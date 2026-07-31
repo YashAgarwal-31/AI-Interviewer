@@ -285,8 +285,3 @@ AI-Interviewer/
 │   └── index.html                      # HTML template
 └── README.md                           # Project documentation
 ```
----
-
-**Built with ❤️ by [Muhammad Navas](https://github.com/muhammadnavas) and the amazing contributors above**
-
-> Transform your technical hiring process with AI-powered interviews that provide comprehensive, unbiased, and detailed candidate assessments.
