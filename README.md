@@ -1,4 +1,4 @@
-# AI Technical Interviewer
+# InterviewBuddy – AI-Powered Interview Preparation Platform
 
 A comprehensive AI-powered technical interview platform that conducts real-time interviews with candidates, featuring voice interaction, code assessment, behavioral monitoring, and automated result generation for recruiters.
 
