@@ -1,11 +1,12 @@
 import express from 'express';
 import { MongoClient, ObjectId } from 'mongodb';
 import emailService from '../utils/emailService.js';
-import { requireAdmin } from '../utils/security.js';
+import { hashAccessToken, requireAdmin } from '../utils/security.js';
 import {
   getScheduledSessionByCandidate,
   getScheduledSessionById,
-  rotateScheduledAccessToken
+  rotateScheduledAccessToken,
+  updateSessionStatus
 } from '../utils/sessionScheduler.js';
 
 const router = express.Router();
@@ -67,6 +68,19 @@ async function resolveCandidateAndSession(candidateId, sessionId = null) {
     throw error;
   }
 
+  if (session.status !== 'scheduled') {
+    const error = new Error('Invites and reminders can only be sent before an interview starts');
+    error.status = 409;
+    throw error;
+  }
+
+  if (new Date(session.endTime) <= new Date()) {
+    await updateSessionStatus(session.sessionId, 'expired');
+    const error = new Error('This interview has already ended. Schedule a new interview before sending an invite.');
+    error.status = 409;
+    throw error;
+  }
+
   const candidate = await findCandidate(db, candidateId);
   const email = candidateEmail(candidate) || session.candidateEmail;
   if (!email) {
@@ -76,6 +90,29 @@ async function resolveCandidateAndSession(candidateId, sessionId = null) {
   }
 
   return { db, session, candidate, email };
+}
+
+async function rollbackTokenRotation(db, session, issuedToken) {
+  const issuedHash = hashAccessToken(issuedToken);
+  const previousHash = session.security?.accessTokenHash || null;
+  const filter = {
+    sessionId: session.sessionId,
+    'security.accessTokenHash': issuedHash
+  };
+
+  if (previousHash) {
+    await db.collection('scheduled_sessions').updateOne(filter, {
+      $set: {
+        'security.accessTokenHash': previousHash,
+        updatedAt: new Date()
+      }
+    });
+  } else {
+    await db.collection('scheduled_sessions').updateOne(filter, {
+      $unset: { 'security.accessTokenHash': '' },
+      $set: { updatedAt: new Date() }
+    });
+  }
 }
 
 async function sendInvite({ candidateId, sessionId = null, reminderMinutes = null }) {
@@ -94,11 +131,22 @@ async function sendInvite({ candidateId, sessionId = null, reminderMinutes = nul
     sessionId: session.sessionId
   };
 
-  const result = reminderMinutes === null
-    ? await emailService.sendSessionInvite(candidateData, secureUrl, sessionDetails)
-    : await emailService.sendSessionReminder(candidateData, secureUrl, sessionDetails, reminderMinutes);
+  let result;
+  try {
+    result = reminderMinutes === null
+      ? await emailService.sendSessionInvite(candidateData, secureUrl, sessionDetails)
+      : await emailService.sendSessionReminder(candidateData, secureUrl, sessionDetails, reminderMinutes);
+  } catch (error) {
+    await rollbackTokenRotation(db, session, token).catch(rollbackError => {
+      console.error('Failed to restore previous interview token after email error:', rollbackError);
+    });
+    throw error;
+  }
 
   if (!result.success) {
+    await rollbackTokenRotation(db, session, token).catch(rollbackError => {
+      console.error('Failed to restore previous interview token after email rejection:', rollbackError);
+    });
     const error = new Error(result.error || 'Failed to send email');
     error.status = 502;
     throw error;
@@ -173,7 +221,7 @@ router.post('/send-reminder', requireAdmin, async (req, res) => {
     const data = await sendInvite({
       candidateId,
       sessionId,
-      reminderMinutes: Math.max(1, Number(minutesUntilStart) || 15)
+      reminderMinutes: Math.min(10080, Math.max(1, Number(minutesUntilStart) || 15))
     });
     return res.json({ success: true, message: 'Reminder email sent successfully', data });
   } catch (error) {
