@@ -15,6 +15,7 @@ import sessionRoutes, { initializeSessionRoutes } from './routes/sessions.js';
 import { logAudit } from './utils/auth.js';
 import emailService from './utils/emailService.js';
 import { requireAdmin } from './utils/security.js';
+import { initializeSessionActionGuard, requireLiveInterviewAction } from './utils/sessionActionGuard.js';
 import { initializeScheduledSessions } from './utils/sessionScheduler.js';
 
 dotenv.config();
@@ -191,7 +192,7 @@ async function connectDatabase() {
     candidatesCollection.createIndex({ candidateId: 1 }, { unique: true }),
     candidatesCollection.createIndex({ updatedAt: -1 }),
     interviewResultsCollection.createIndex({ savedAt: -1 }),
-    interviewResultsCollection.createIndex({ sessionId: 1 })
+    interviewResultsCollection.createIndex({ sessionId: 1 }, { unique: true, sparse: true })
   ]);
 
   mongoConnected = true;
@@ -228,10 +229,14 @@ function initializeRoutes(openai) {
   initializeCandidateRoutes(collections);
   initializeResultRoutes(collections);
   initializePlatformRoutes(collections);
+  initializeSessionActionGuard(collections);
 
   app.use('/api/auth', authRoutes);
   app.use('/api/platform', platformRoutes);
   app.use('/api/sessions/integrations', integrationRoutes);
+  app.use('/api/sessions/message/:sessionId', requireLiveInterviewAction);
+  app.use('/api/sessions/coding-tasks/:sessionId', requireLiveInterviewAction);
+  app.use('/api/sessions/end/:sessionId', requireLiveInterviewAction);
   app.use('/api/sessions', sessionRoutes);
   app.use('/api/scheduled-sessions', scheduledSessionsRoutes);
   app.use('/api/email', emailRoutes);
