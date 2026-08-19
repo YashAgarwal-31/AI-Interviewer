@@ -17,18 +17,34 @@ import {
 } from '../utils/sessionScheduler.js';
 
 const router = express.Router();
+const MIN_DURATION_MINUTES = 15;
+const MAX_DURATION_MINUTES = 240;
 
 const frontendBaseUrl = () => (
     process.env.PRODUCTION_FRONTEND_URL || process.env.FRONTEND_URL || 'http://localhost:5173'
 ).replace(/\/$/, '');
 
 function buildAccessUrl(session, accessToken) {
-    const params = new URLSearchParams({
-        candidateId: String(session.candidateId),
-        sessionId: String(session.sessionId)
-    });
+    const params = new URLSearchParams({ candidateId: String(session.candidateId), sessionId: String(session.sessionId) });
     const fragment = new URLSearchParams({ accessToken: String(accessToken) });
     return `${frontendBaseUrl()}/?${params.toString()}#${fragment.toString()}`;
+}
+
+function durationMinutes(start, end) {
+    return Math.ceil((new Date(end) - new Date(start)) / 60000);
+}
+
+function validateSchedule(startTime, endTime, { requireFuture = true } = {}) {
+    const start = new Date(startTime);
+    const end = new Date(endTime);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 'Invalid start or end time';
+    if (start >= end) return 'Start time must be before end time';
+    const duration = durationMinutes(start, end);
+    if (duration < MIN_DURATION_MINUTES || duration > MAX_DURATION_MINUTES) {
+        return `Interview duration must be between ${MIN_DURATION_MINUTES} and ${MAX_DURATION_MINUTES} minutes`;
+    }
+    if (requireFuture && end <= new Date()) return 'End time must be in the future';
+    return null;
 }
 
 function publicSession(session, accessToken = null, validation = null) {
@@ -63,9 +79,7 @@ function publicSession(session, accessToken = null, validation = null) {
 router.get('/candidate/:candidateId', requireAdmin, async (req, res) => {
     try {
         const session = await getScheduledSessionByCandidate(req.params.candidateId, { includeExpired: true });
-        if (!session) {
-            return res.status(404).json({ success: false, error: 'No session found for this candidate' });
-        }
+        if (!session) return res.status(404).json({ success: false, error: 'No session found for this candidate' });
         return res.json({ success: true, session: publicSession(session) });
     } catch (error) {
         console.error('Error fetching scheduled session:', error);
@@ -77,44 +91,19 @@ router.post('/create', requireAdmin, async (req, res) => {
     try {
         const sessionData = req.body || {};
         if (!sessionData.candidateId || !sessionData.candidateName || !sessionData.startTime || !sessionData.endTime) {
-            return res.status(400).json({
-                success: false,
-                error: 'candidateId, candidateName, startTime and endTime are required'
-            });
+            return res.status(400).json({ success: false, error: 'candidateId, candidateName, startTime and endTime are required' });
         }
-
-        const startTime = new Date(sessionData.startTime);
-        const endTime = new Date(sessionData.endTime);
-        if (Number.isNaN(startTime.getTime()) || Number.isNaN(endTime.getTime())) {
-            return res.status(400).json({ success: false, error: 'Invalid start or end time' });
-        }
-        if (startTime >= endTime) {
-            return res.status(400).json({ success: false, error: 'Start time must be before end time' });
-        }
-        if (endTime <= new Date()) {
-            return res.status(400).json({ success: false, error: 'End time must be in the future' });
-        }
+        const scheduleError = validateSchedule(sessionData.startTime, sessionData.endTime);
+        if (scheduleError) return res.status(400).json({ success: false, error: scheduleError });
 
         const existingSession = await getScheduledSessionByCandidate(sessionData.candidateId);
         if (existingSession) {
-            return res.status(409).json({
-                success: false,
-                error: 'Candidate already has an active or scheduled session',
-                existingSession: publicSession(existingSession)
-            });
+            return res.status(409).json({ success: false, error: 'Candidate already has an active or scheduled session', existingSession: publicSession(existingSession) });
         }
 
         const createdSession = await createScheduledSession(sessionData);
         const accessUrl = buildAccessUrl(createdSession, createdSession.accessToken);
-
-        return res.status(201).json({
-            success: true,
-            message: 'Scheduled session created successfully',
-            session: {
-                ...publicSession(createdSession),
-                accessUrl
-            }
-        });
+        return res.status(201).json({ success: true, message: 'Scheduled session created successfully', session: { ...publicSession(createdSession), accessUrl } });
     } catch (error) {
         console.error('Error creating scheduled session:', error);
         return res.status(500).json({ success: false, error: error.message || 'Failed to create scheduled session' });
@@ -124,21 +113,9 @@ router.post('/create', requireAdmin, async (req, res) => {
 router.post('/access', async (req, res) => {
     try {
         const { candidateId, sessionId, accessToken } = req.body || {};
-        if ((!candidateId && !sessionId) || !accessToken) {
-            return res.status(400).json({
-                success: false,
-                error: 'candidateId or sessionId, plus accessToken, are required'
-            });
-        }
-
-        const session = sessionId
-            ? await getScheduledSessionById(sessionId)
-            : await getScheduledSessionByCandidate(candidateId);
-
-        if (!session || (candidateId && String(session.candidateId) !== String(candidateId))) {
-            return res.status(404).json({ success: false, error: 'Scheduled session not found' });
-        }
-
+        if ((!candidateId && !sessionId) || !accessToken) return res.status(400).json({ success: false, error: 'candidateId or sessionId, plus accessToken, are required' });
+        const session = sessionId ? await getScheduledSessionById(sessionId) : await getScheduledSessionByCandidate(candidateId);
+        if (!session || (candidateId && String(session.candidateId) !== String(candidateId))) return res.status(404).json({ success: false, error: 'Scheduled session not found' });
         if (!verifyScheduledAccessToken(session, accessToken)) {
             await incrementAccessAttempts(session.sessionId);
             return res.status(401).json({ success: false, error: 'Invalid interview access token' });
@@ -146,38 +123,14 @@ router.post('/access', async (req, res) => {
 
         const validation = validateSessionTiming(session);
         if (!validation.isValid) {
-            if (validation.shouldExpire) {
-                await updateSessionStatus(session.sessionId, 'expired');
-            }
-            return res.status(403).json({
-                success: false,
-                error: validation.reason,
-                sessionInfo: {
-                    candidateName: session.candidateName,
-                    position: session.position,
-                    startTime: session.startTime,
-                    endTime: session.endTime,
-                    status: session.status,
-                    timeToStart: validation.timeToStart,
-                    timeToEnd: validation.timeToEnd,
-                    accessibleFrom: validation.accessStart
-                }
-            });
+            if (validation.shouldExpire) await updateSessionStatus(session.sessionId, 'expired');
+            return res.status(403).json({ success: false, error: validation.reason, sessionInfo: { candidateName: session.candidateName, position: session.position, startTime: session.startTime, endTime: session.endTime, status: session.status, timeToStart: validation.timeToStart, timeToEnd: validation.timeToEnd, accessibleFrom: validation.accessStart } });
         }
 
         let activeSession = session;
-        if (session.status === 'scheduled') {
-            activeSession = await startSession(session.sessionId);
-        }
+        if (session.status === 'scheduled') activeSession = await startSession(session.sessionId);
         await resetAccessAttempts(session.sessionId);
-
-        return res.json({
-            success: true,
-            message: 'Session access granted',
-            session: publicSession(activeSession, accessToken, validation),
-            interviewData: activeSession.interviewData || null,
-            initialMessage: `Hello ${activeSession.candidateName}! Welcome to your technical interview for the ${activeSession.position} position. Let's begin.`
-        });
+        return res.json({ success: true, message: 'Session access granted', session: publicSession(activeSession, accessToken, validation), interviewData: activeSession.interviewData || null, initialMessage: `Hello ${activeSession.candidateName}! Welcome to your technical interview for the ${activeSession.position} position. Let's begin.` });
     } catch (error) {
         console.error('Error accessing scheduled session:', error);
         return res.status(500).json({ success: false, error: 'Failed to access session' });
@@ -189,21 +142,10 @@ router.get('/status/:sessionId', async (req, res) => {
         const accessToken = req.query.token || req.get('x-interview-token');
         const session = await getScheduledSessionById(req.params.sessionId);
         if (!session) return res.status(404).json({ success: false, error: 'Session not found' });
-        if (!verifyScheduledAccessToken(session, accessToken)) {
-            return res.status(401).json({ success: false, error: 'Invalid interview access token' });
-        }
-
+        if (!verifyScheduledAccessToken(session, accessToken)) return res.status(401).json({ success: false, error: 'Invalid interview access token' });
         const validation = validateSessionTiming(session);
         if (validation.shouldExpire) await updateSessionStatus(session.sessionId, 'expired');
-
-        return res.json({
-            success: true,
-            sessionStatus: {
-                ...publicSession(session, null, validation),
-                isAccessible: validation.isValid,
-                reason: validation.reason
-            }
-        });
+        return res.json({ success: true, sessionStatus: { ...publicSession(session, null, validation), isAccessible: validation.isValid, reason: validation.reason } });
     } catch (error) {
         console.error('Error checking scheduled session status:', error);
         return res.status(500).json({ success: false, error: 'Failed to check session status' });
@@ -213,16 +155,10 @@ router.get('/status/:sessionId', async (req, res) => {
 router.post('/complete', async (req, res) => {
     try {
         const { sessionId, accessToken, completionData } = req.body || {};
-        if (!sessionId || !accessToken) {
-            return res.status(400).json({ success: false, error: 'sessionId and accessToken are required' });
-        }
-
+        if (!sessionId || !accessToken) return res.status(400).json({ success: false, error: 'sessionId and accessToken are required' });
         const session = await getScheduledSessionById(sessionId);
         if (!session) return res.status(404).json({ success: false, error: 'Session not found' });
-        if (!verifyScheduledAccessToken(session, accessToken)) {
-            return res.status(401).json({ success: false, error: 'Invalid interview access token' });
-        }
-
+        if (!verifyScheduledAccessToken(session, accessToken)) return res.status(401).json({ success: false, error: 'Invalid interview access token' });
         const completed = await completeSession(sessionId, completionData || {});
         return res.json({ success: true, message: 'Session completed successfully', session: publicSession(completed) });
     } catch (error) {
@@ -233,25 +169,10 @@ router.post('/complete', async (req, res) => {
 
 router.get('/list', requireAdmin, async (req, res) => {
     try {
-        const filters = {
-            status: req.query.status,
-            candidateId: req.query.candidateId,
-            dateFrom: req.query.dateFrom,
-            dateTo: req.query.dateTo
-        };
+        const filters = { status: req.query.status, candidateId: req.query.candidateId, dateFrom: req.query.dateFrom, dateTo: req.query.dateTo };
         Object.keys(filters).forEach(key => filters[key] === undefined && delete filters[key]);
-
         const sessions = await getAllScheduledSessions(filters);
-        return res.json({
-            success: true,
-            count: sessions.length,
-            sessions: sessions.map(session => ({
-                ...publicSession(session),
-                accessAttempts: session.accessAttempts || 0,
-                createdAt: session.createdAt,
-                updatedAt: session.updatedAt
-            }))
-        });
+        return res.json({ success: true, count: sessions.length, sessions: sessions.map(session => ({ ...publicSession(session), accessAttempts: session.accessAttempts || 0, createdAt: session.createdAt, updatedAt: session.updatedAt })) });
     } catch (error) {
         console.error('Error listing scheduled sessions:', error);
         return res.status(500).json({ success: false, error: 'Failed to list sessions' });
@@ -262,6 +183,9 @@ router.put('/update/:sessionId', requireAdmin, async (req, res) => {
     try {
         const existing = await getScheduledSessionById(req.params.sessionId);
         if (!existing) return res.status(404).json({ success: false, error: 'Session not found' });
+        if (['completed', 'expired', 'cancelled'].includes(existing.status)) {
+            return res.status(409).json({ success: false, error: `A ${existing.status} interview cannot be modified` });
+        }
 
         const updateData = { ...req.body };
         const requestedStatus = updateData.status;
@@ -269,19 +193,22 @@ router.put('/update/:sessionId', requireAdmin, async (req, res) => {
         delete updateData.security;
         delete updateData.accessAttempts;
         delete updateData.maxAccessAttempts;
+        delete updateData.sessionId;
+        delete updateData.candidateId;
+        delete updateData.createdAt;
 
         if (updateData.startTime) updateData.startTime = new Date(updateData.startTime);
         if (updateData.endTime) updateData.endTime = new Date(updateData.endTime);
-
         const start = updateData.startTime || existing.startTime;
         const end = updateData.endTime || existing.endTime;
-        if (new Date(start) >= new Date(end)) {
-            return res.status(400).json({ success: false, error: 'Start time must be before end time' });
-        }
+        const scheduleError = validateSchedule(start, end, { requireFuture: requestedStatus !== 'cancelled' });
+        if (scheduleError && requestedStatus !== 'cancelled') return res.status(400).json({ success: false, error: scheduleError });
 
+        if (requestedStatus && !['scheduled', 'active', 'cancelled'].includes(requestedStatus)) {
+            return res.status(400).json({ success: false, error: 'Only scheduled, active, or cancelled are valid recruiter status changes' });
+        }
         if (requestedStatus) await updateSessionStatus(req.params.sessionId, requestedStatus);
         if (Object.keys(updateData).length > 0) await patchScheduledSession(req.params.sessionId, updateData);
-
         const updated = await getScheduledSessionById(req.params.sessionId);
         return res.json({ success: true, message: 'Session updated successfully', session: publicSession(updated) });
     } catch (error) {
@@ -293,11 +220,7 @@ router.put('/update/:sessionId', requireAdmin, async (req, res) => {
 router.post('/cleanup', requireAdmin, async (req, res) => {
     try {
         const result = await cleanupExpiredSessions({ deleteAfterDays: req.body?.deleteAfterDays || 30 });
-        return res.json({
-            success: true,
-            message: 'Cleanup completed',
-            deletedCount: result.deletedCount
-        });
+        return res.json({ success: true, message: 'Cleanup completed', deletedCount: result.deletedCount });
     } catch (error) {
         console.error('Error during session cleanup:', error);
         return res.status(500).json({ success: false, error: 'Failed to cleanup expired sessions' });
