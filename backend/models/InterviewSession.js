@@ -1,10 +1,27 @@
 import { Schema, model } from 'mongoose';
 
+const conversationMessageSchema = new Schema({
+  role: {
+    type: String,
+    enum: ['system', 'assistant', 'user'],
+    required: true
+  },
+  content: {
+    type: String,
+    required: true
+  },
+  timestamp: {
+    type: Date,
+    default: Date.now
+  }
+}, { _id: false });
+
 const interviewSessionSchema = new Schema({
   sessionId: {
     type: String,
     required: true,
-    unique: true
+    unique: true,
+    index: true
   },
   candidateId: {
     type: Schema.Types.ObjectId,
@@ -26,11 +43,14 @@ const interviewSessionSchema = new Schema({
   candidateDetails: {
     candidateName: {
       type: String,
-      required: true
+      required: true,
+      trim: true
     },
     candidateEmail: {
       type: String,
-      required: true
+      required: true,
+      trim: true,
+      lowercase: true
     },
     phoneNumber: String,
     companyName: String,
@@ -52,18 +72,20 @@ const interviewSessionSchema = new Schema({
       default: 'UTC'
     },
     duration: {
-      type: Number, // in minutes
-      default: 60
+      type: Number,
+      default: 60,
+      min: 1
     },
     accessWindow: {
-      beforeStart: { type: Number, default: 15 }, // minutes before start time
-      afterEnd: { type: Number, default: 15 } // minutes after end time
+      beforeStart: { type: Number, default: 15, min: 0 },
+      afterEnd: { type: Number, default: 15, min: 0 }
     }
   },
   sessionStatus: {
     type: String,
     enum: ['scheduled', 'active', 'completed', 'expired', 'cancelled'],
-    default: 'scheduled'
+    default: 'scheduled',
+    index: true
   },
   accessControl: {
     isActive: {
@@ -74,26 +96,32 @@ const interviewSessionSchema = new Schema({
     accessEndTime: Date,
     candidateJoinedAt: Date,
     candidateLeftAt: Date,
-    totalTimeSpent: Number // in minutes
+    totalTimeSpent: Number
   },
   interviewData: {
-    conversationHistory: [{
-      role: {
-        type: String,
-        enum: ['system', 'assistant', 'user']
-      },
-      content: String,
-      timestamp: {
-        type: Date,
-        default: Date.now
-      }
-    }],
+    candidateProfile: {
+      type: Schema.Types.Mixed,
+      default: null
+    },
+    interviewQuestions: {
+      type: [String],
+      default: []
+    },
+    codingTasks: {
+      type: [Schema.Types.Mixed],
+      default: []
+    },
+    systemPrompt: {
+      type: String,
+      default: ''
+    },
+    conversationHistory: {
+      type: [conversationMessageSchema],
+      default: []
+    },
     metadata: {
-      startTime: Date,
-      endTime: Date,
-      questionsAsked: { type: Number, default: 0 },
-      answersReceived: { type: Number, default: 0 },
-      codingTestsCompleted: { type: Number, default: 0 }
+      type: Schema.Types.Mixed,
+      default: {}
     },
     results: {
       fileName: String,
@@ -104,16 +132,19 @@ const interviewSessionSchema = new Schema({
   security: {
     accessToken: {
       type: String,
-      required: true
+      required: true,
+      select: false
     },
-    ipRestrictions: [String], // Optional IP whitelist
+    ipRestrictions: [String],
     maxLoginAttempts: {
       type: Number,
-      default: 3
+      default: 3,
+      min: 1
     },
     loginAttempts: {
       type: Number,
-      default: 0
+      default: 0,
+      min: 0
     },
     lastLoginAttempt: Date
   },
@@ -129,69 +160,67 @@ const interviewSessionSchema = new Schema({
   timestamps: true
 });
 
-// Index for efficient queries
-interviewSessionSchema.index({ candidateId: 1, scheduledStartTime: 1 });
-interviewSessionSchema.index({ sessionId: 1 });
-interviewSessionSchema.index({ accessToken: 1 });
+interviewSessionSchema.index({ candidateId: 1, 'sessionConfig.scheduledStartTime': 1 });
+interviewSessionSchema.index({ 'security.accessToken': 1 });
 interviewSessionSchema.index({ sessionStatus: 1, 'sessionConfig.scheduledStartTime': 1 });
 
-// Virtual for checking if session is currently accessible
 interviewSessionSchema.virtual('isAccessible').get(function() {
   const now = new Date();
   const startTime = new Date(this.sessionConfig.scheduledStartTime);
   const endTime = new Date(this.sessionConfig.scheduledEndTime);
   const accessStart = new Date(startTime.getTime() - (this.sessionConfig.accessWindow.beforeStart * 60000));
   const accessEnd = new Date(endTime.getTime() + (this.sessionConfig.accessWindow.afterEnd * 60000));
-  
-  return now >= accessStart && now <= accessEnd && this.sessionStatus === 'scheduled';
+
+  return now >= accessStart && now <= accessEnd && ['scheduled', 'active'].includes(this.sessionStatus);
 });
 
-// Method to activate session
 interviewSessionSchema.methods.activateSession = function() {
   const now = new Date();
   this.sessionStatus = 'active';
   this.accessControl.isActive = true;
-  this.accessControl.accessStartTime = now;
-  this.accessControl.candidateJoinedAt = now;
-  
-  // Calculate access end time
+  this.accessControl.accessStartTime = this.accessControl.accessStartTime || now;
+  this.accessControl.candidateJoinedAt = this.accessControl.candidateJoinedAt || now;
+
   const endTime = new Date(this.sessionConfig.scheduledEndTime);
-  const accessEnd = new Date(endTime.getTime() + (this.sessionConfig.accessWindow.afterEnd * 60000));
-  this.accessControl.accessEndTime = accessEnd;
-  
+  this.accessControl.accessEndTime = new Date(
+    endTime.getTime() + (this.sessionConfig.accessWindow.afterEnd * 60000)
+  );
+
   return this.save();
 };
 
-// Method to complete session
 interviewSessionSchema.methods.completeSession = function() {
   const now = new Date();
   this.sessionStatus = 'completed';
   this.accessControl.isActive = false;
   this.accessControl.candidateLeftAt = now;
-  
-  // Calculate total time spent
+
   if (this.accessControl.candidateJoinedAt) {
-    const timeSpent = (now - this.accessControl.candidateJoinedAt) / (1000 * 60); // in minutes
-    this.accessControl.totalTimeSpent = Math.round(timeSpent);
+    const timeSpent = (now - this.accessControl.candidateJoinedAt) / (1000 * 60);
+    this.accessControl.totalTimeSpent = Math.max(0, Math.round(timeSpent));
   }
-  
-  this.interviewData.metadata.endTime = now;
-  
+
+  this.interviewData = this.interviewData || {};
+  this.interviewData.metadata = {
+    ...(this.interviewData.metadata || {}),
+    endTime: now
+  };
+  this.markModified('interviewData.metadata');
+
   return this.save();
 };
 
-// Method to check if session should be expired
 interviewSessionSchema.methods.checkExpiry = function() {
   const now = new Date();
   const endTime = new Date(this.sessionConfig.scheduledEndTime);
   const accessEnd = new Date(endTime.getTime() + (this.sessionConfig.accessWindow.afterEnd * 60000));
-  
-  if (now > accessEnd && this.sessionStatus !== 'completed') {
+
+  if (now > accessEnd && !['completed', 'cancelled', 'expired'].includes(this.sessionStatus)) {
     this.sessionStatus = 'expired';
     this.accessControl.isActive = false;
     return this.save();
   }
-  
+
   return Promise.resolve(this);
 };
 
