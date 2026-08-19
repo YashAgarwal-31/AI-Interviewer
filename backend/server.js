@@ -8,6 +8,7 @@ import authRoutes from './routes/auth.js';
 import candidateRoutes, { initializeCandidateRoutes } from './routes/candidates.js';
 import emailRoutes, { closeEmailDatabase } from './routes/email.js';
 import integrationRoutes from './routes/integrations.js';
+import liveCompletionRoutes, { initializeLiveCompletionRoutes } from './routes/liveCompletion.js';
 import platformRoutes, { initializePlatformRoutes } from './routes/platform.js';
 import resultRoutes, { initializeResultRoutes } from './routes/results.js';
 import scheduledSessionsRoutes from './routes/scheduledSessions.js';
@@ -226,6 +227,7 @@ function initializeRoutes(openai) {
   };
 
   initializeSessionRoutes(collections, openai);
+  initializeLiveCompletionRoutes(collections, openai);
   initializeCandidateRoutes(collections);
   initializeResultRoutes(collections);
   initializePlatformRoutes(collections);
@@ -237,6 +239,7 @@ function initializeRoutes(openai) {
   app.use('/api/sessions/message/:sessionId', requireLiveInterviewAction);
   app.use('/api/sessions/coding-tasks/:sessionId', requireLiveInterviewAction);
   app.use('/api/sessions/end/:sessionId', requireLiveInterviewAction);
+  app.use('/api/sessions', liveCompletionRoutes);
   app.use('/api/sessions', sessionRoutes);
   app.use('/api/scheduled-sessions', scheduledSessionsRoutes);
   app.use('/api/email', emailRoutes);
