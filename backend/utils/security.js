@@ -46,6 +46,10 @@ function serverAdminAuthenticated(req) {
   return Boolean(expectedKey && providedKey && safeEqual(providedKey, expectedKey));
 }
 
+function attachServerAdmin(req) {
+  req.actor = { type: 'server-admin', email: null };
+}
+
 async function platformAuth(req) {
   if (req.platformUser && req.platformSession) {
     return { user: req.platformUser, session: req.platformSession };
@@ -80,6 +84,11 @@ export async function requirePlatformUser(req, res, next) {
 export function requireRoles(...roles) {
   const allowed = new Set(roles);
   return async (req, res, next) => {
+    if (serverAdminAuthenticated(req)) {
+      attachServerAdmin(req);
+      return next();
+    }
+
     try {
       const auth = await platformAuth(req);
       if (!auth) {
@@ -99,7 +108,7 @@ export function requireRoles(...roles) {
 
 export async function requireAdmin(req, res, next) {
   if (serverAdminAuthenticated(req)) {
-    req.actor = { type: 'server-admin', email: null };
+    attachServerAdmin(req);
     return next();
   }
 
@@ -118,7 +127,8 @@ export async function requireAdmin(req, res, next) {
   }
 
   if (process.env.NODE_ENV !== 'production' && !process.env.ADMIN_API_KEY) {
-    req.actor = { type: 'server-admin', email: 'local-development' };
+    attachServerAdmin(req);
+    req.actor.email = 'local-development';
     return next();
   }
 
