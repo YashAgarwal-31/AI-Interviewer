@@ -3,6 +3,7 @@ import { generateAccessToken, hashAccessToken, verifyAccessToken } from './secur
 
 let scheduledSessionsCollection = null;
 const SESSION_STATUSES = new Set(['scheduled', 'active', 'completed', 'expired', 'cancelled']);
+const MAX_ACCESS_WINDOW_MINUTES = 120;
 
 export async function initializeScheduledSessions(db) {
     if (!db) {
@@ -42,6 +43,12 @@ function positiveInteger(value, fallback, fieldName) {
     return rounded;
 }
 
+function accessWindowMinutes(value, fallback) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+    return Math.min(MAX_ACCESS_WINDOW_MINUTES, Math.floor(parsed));
+}
+
 export async function createScheduledSession(sessionData) {
     requireCollection();
 
@@ -54,8 +61,7 @@ export async function createScheduledSession(sessionData) {
 
     const rawToken = generateAccessToken();
     const now = new Date();
-    const calculatedDuration = Math.max(1, Math.ceil((endTime - startTime) / 60000));
-    const duration = positiveInteger(sessionData.duration, calculatedDuration, 'duration');
+    const duration = Math.max(1, Math.ceil((endTime - startTime) / 60000));
     const maxAccessAttempts = positiveInteger(sessionData.maxAccessAttempts, 5, 'maxAccessAttempts');
 
     const scheduledSession = {
@@ -70,8 +76,8 @@ export async function createScheduledSession(sessionData) {
         endTime,
         duration,
         accessWindow: {
-            beforeStart: Math.max(0, Number(sessionData.accessWindow?.beforeStart ?? 15)),
-            afterEnd: Math.max(0, Number(sessionData.accessWindow?.afterEnd ?? 15))
+            beforeStart: accessWindowMinutes(sessionData.accessWindow?.beforeStart, 15),
+            afterEnd: accessWindowMinutes(sessionData.accessWindow?.afterEnd, 15)
         },
         status: 'scheduled',
         accessAttempts: 0,
@@ -115,7 +121,10 @@ export async function getScheduledSessionByCandidate(candidateId, { includeExpir
 
     if (!includeExpired) {
         query.status = { $in: ['scheduled', 'active'] };
-        query.endTime = { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) };
+        // Candidate-only lookup is a compatibility path. New signed links contain
+        // a sessionId and resolve the exact session, including any after-end grace.
+        // Excluding already-ended rows prevents stale sessions blocking new ones.
+        query.endTime = { $gte: new Date() };
     }
 
     return scheduledSessionsCollection.findOne(query, { sort: { startTime: 1 } });
@@ -178,8 +187,8 @@ export function validateSessionTiming(session) {
         };
     }
 
-    const beforeStart = Math.max(0, Number(session.accessWindow?.beforeStart ?? 0));
-    const afterEnd = Math.max(0, Number(session.accessWindow?.afterEnd ?? 0));
+    const beforeStart = accessWindowMinutes(session.accessWindow?.beforeStart, 0);
+    const afterEnd = accessWindowMinutes(session.accessWindow?.afterEnd, 0);
     const accessStart = new Date(startTime.getTime() - beforeStart * 60000);
     const accessEnd = new Date(endTime.getTime() + afterEnd * 60000);
 
@@ -325,11 +334,12 @@ export async function getAllScheduledSessions(filters = {}) {
 export async function cleanupExpiredSessions({ deleteAfterDays = 30 } = {}) {
     requireCollection();
     const now = new Date();
+    const cleanupWindow = new Date(now.getTime() - MAX_ACCESS_WINDOW_MINUTES * 60000);
     const cutoff = new Date(now.getTime() - Math.max(1, Number(deleteAfterDays)) * 24 * 60 * 60 * 1000);
 
     await scheduledSessionsCollection.updateMany(
         {
-            endTime: { $lt: now },
+            endTime: { $lt: cleanupWindow },
             status: { $in: ['scheduled', 'active'] }
         },
         {
