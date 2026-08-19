@@ -14,12 +14,20 @@ services:
         sync: false
       - key: MONGO_DB_NAME
         value: ai_interviewer
+      - key: MONGO_MAX_POOL_SIZE
+        value: "20"
       - key: ADMIN_API_KEY
         sync: false
+      - key: AUTH_SESSION_HOURS
+        value: "12"
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_INTERVIEW_MODEL
         value: gpt-4.1-mini
+      - key: OPENAI_TIMEOUT_MS
+        value: "45000"
+      - key: OPENAI_MAX_RETRIES
+        value: "2"
       - key: RESEND_API_KEY
         sync: false
       - key: FROM_EMAIL
