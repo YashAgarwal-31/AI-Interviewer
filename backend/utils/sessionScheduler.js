@@ -1,6 +1,8 @@
 import crypto from 'crypto';
+import { generateAccessToken, hashAccessToken, verifyAccessToken } from './security.js';
 
 let scheduledSessionsCollection = null;
+const SESSION_STATUSES = new Set(['scheduled', 'active', 'completed', 'expired', 'cancelled']);
 
 export async function initializeScheduledSessions(db) {
     if (!db) {
@@ -12,9 +14,9 @@ export async function initializeScheduledSessions(db) {
     await Promise.all([
         scheduledSessionsCollection.createIndex({ candidateId: 1, startTime: 1 }),
         scheduledSessionsCollection.createIndex({ sessionId: 1 }, { unique: true }),
-        scheduledSessionsCollection.createIndex({ startTime: 1 }),
+        scheduledSessionsCollection.createIndex({ status: 1, startTime: 1 }),
         scheduledSessionsCollection.createIndex({ endTime: 1 }),
-        scheduledSessionsCollection.createIndex({ status: 1, startTime: 1 })
+        scheduledSessionsCollection.createIndex({ 'security.accessTokenHash': 1 }, { sparse: true })
     ]);
 }
 
@@ -32,41 +34,51 @@ function toValidDate(value, fieldName) {
     return date;
 }
 
+function positiveInteger(value, fallback, fieldName) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+    const rounded = Math.floor(parsed);
+    if (rounded <= 0) throw new Error(`${fieldName} must be greater than zero`);
+    return rounded;
+}
+
 export async function createScheduledSession(sessionData) {
     requireCollection();
 
-    if (!sessionData?.candidateId) {
-        throw new Error('candidateId is required');
-    }
-    if (!sessionData?.candidateName) {
-        throw new Error('candidateName is required');
-    }
+    if (!sessionData?.candidateId) throw new Error('candidateId is required');
+    if (!sessionData?.candidateName) throw new Error('candidateName is required');
 
     const startTime = toValidDate(sessionData.startTime, 'startTime');
     const endTime = toValidDate(sessionData.endTime, 'endTime');
+    if (endTime <= startTime) throw new Error('endTime must be after startTime');
 
-    if (endTime <= startTime) {
-        throw new Error('endTime must be after startTime');
-    }
-
-    const duration = Number(sessionData.duration) || Math.ceil((endTime - startTime) / 60000);
-    if (duration <= 0) {
-        throw new Error('duration must be greater than zero');
-    }
-
+    const rawToken = generateAccessToken();
     const now = new Date();
+    const calculatedDuration = Math.max(1, Math.ceil((endTime - startTime) / 60000));
+    const duration = positiveInteger(sessionData.duration, calculatedDuration, 'duration');
+    const maxAccessAttempts = positiveInteger(sessionData.maxAccessAttempts, 5, 'maxAccessAttempts');
+
     const scheduledSession = {
         sessionId: `session_${crypto.randomUUID()}`,
         candidateId: String(sessionData.candidateId),
         candidateName: String(sessionData.candidateName).trim(),
+        candidateEmail: sessionData.candidateEmail ? String(sessionData.candidateEmail).trim().toLowerCase() : null,
+        companyName: sessionData.companyName || null,
         position: sessionData.position || 'Software Developer',
         interviewerName: sessionData.interviewerName || 'AI Interviewer',
         startTime,
         endTime,
         duration,
+        accessWindow: {
+            beforeStart: Math.max(0, Number(sessionData.accessWindow?.beforeStart ?? 15)),
+            afterEnd: Math.max(0, Number(sessionData.accessWindow?.afterEnd ?? 15))
+        },
         status: 'scheduled',
         accessAttempts: 0,
-        maxAccessAttempts: Number(sessionData.maxAccessAttempts) || 3,
+        maxAccessAttempts,
+        security: {
+            accessTokenHash: hashAccessToken(rawToken)
+        },
         createdAt: now,
         updatedAt: now,
         interviewConfig: {
@@ -85,25 +97,58 @@ export async function createScheduledSession(sessionData) {
             language: sessionData.language || 'en',
             recordingEnabled: sessionData.recordingEnabled !== false,
             notes: sessionData.notes || ''
-        }
+        },
+        interviewData: sessionData.interviewData || null
     };
 
     const result = await scheduledSessionsCollection.insertOne(scheduledSession);
-    return { ...scheduledSession, _id: result.insertedId };
+    return {
+        ...scheduledSession,
+        _id: result.insertedId,
+        accessToken: rawToken
+    };
 }
 
-export async function getScheduledSessionByCandidate(candidateId) {
+export async function getScheduledSessionByCandidate(candidateId, { includeExpired = false } = {}) {
     requireCollection();
+    const query = { candidateId: String(candidateId) };
 
-    const now = new Date();
-    return scheduledSessionsCollection.findOne(
+    if (!includeExpired) {
+        query.status = { $in: ['scheduled', 'active'] };
+        query.endTime = { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) };
+    }
+
+    return scheduledSessionsCollection.findOne(query, { sort: { startTime: 1 } });
+}
+
+export async function getScheduledSessionById(sessionId) {
+    requireCollection();
+    return scheduledSessionsCollection.findOne({ sessionId: String(sessionId) });
+}
+
+export function verifyScheduledAccessToken(session, accessToken) {
+    return verifyAccessToken(session, accessToken);
+}
+
+export async function rotateScheduledAccessToken(sessionId) {
+    requireCollection();
+    const rawToken = generateAccessToken();
+    const result = await scheduledSessionsCollection.updateOne(
+        { sessionId: String(sessionId) },
         {
-            candidateId: String(candidateId),
-            status: { $in: ['scheduled', 'active'] },
-            endTime: { $gte: now }
-        },
-        { sort: { startTime: 1 } }
+            $set: {
+                'security.accessTokenHash': hashAccessToken(rawToken),
+                updatedAt: new Date()
+            },
+            $unset: {
+                accessToken: '',
+                'security.accessToken': ''
+            }
+        }
     );
+
+    if (!result.matchedCount) throw new Error('Scheduled session not found');
+    return rawToken;
 }
 
 export function validateSessionTiming(session) {
@@ -133,37 +178,44 @@ export function validateSessionTiming(session) {
         };
     }
 
+    const beforeStart = Math.max(0, Number(session.accessWindow?.beforeStart ?? 0));
+    const afterEnd = Math.max(0, Number(session.accessWindow?.afterEnd ?? 0));
+    const accessStart = new Date(startTime.getTime() - beforeStart * 60000);
+    const accessEnd = new Date(endTime.getTime() + afterEnd * 60000);
+
     const validation = {
         isValid: false,
         reason: '',
         timeToStart: Math.max(0, Math.ceil((startTime - now) / 60000)),
         timeToEnd: Math.max(0, Math.ceil((endTime - now) / 60000)),
         status: session.status,
-        shouldExpire: false
+        shouldExpire: false,
+        accessStart,
+        accessEnd
     };
 
     if (session.status === 'cancelled') {
         validation.reason = 'Session has been cancelled';
         return validation;
     }
-
     if (session.status === 'completed') {
         validation.reason = 'Session has already been completed';
         return validation;
     }
-
     if (session.status === 'expired') {
         validation.reason = 'Session has expired';
         return validation;
     }
-
-    if (now < startTime) {
-        validation.reason = `Session hasn't started yet. Please come back at ${startTime.toLocaleString()}`;
+    if ((session.accessAttempts || 0) >= (session.maxAccessAttempts || 5)) {
+        validation.reason = 'Maximum failed access attempts exceeded';
         return validation;
     }
-
-    if (now > endTime) {
-        validation.reason = `Session time has expired. Session was valid until ${endTime.toLocaleString()}`;
+    if (now < accessStart) {
+        validation.reason = `Session is not accessible yet. Access starts at ${accessStart.toLocaleString()}`;
+        return validation;
+    }
+    if (now > accessEnd) {
+        validation.reason = 'Session access window has expired';
         validation.shouldExpire = true;
         return validation;
     }
@@ -173,31 +225,46 @@ export function validateSessionTiming(session) {
     return validation;
 }
 
+export async function patchScheduledSession(sessionId, patch = {}) {
+    requireCollection();
+    const safePatch = { ...patch, updatedAt: new Date() };
+    delete safePatch._id;
+    delete safePatch.sessionId;
+    delete safePatch.createdAt;
+    delete safePatch.security;
+    delete safePatch.accessToken;
+    delete safePatch.accessTokenHash;
+
+    const result = await scheduledSessionsCollection.findOneAndUpdate(
+        { sessionId: String(sessionId) },
+        { $set: safePatch },
+        { returnDocument: 'after' }
+    );
+
+    return result || null;
+}
+
 export async function updateSessionStatus(sessionId, status, additionalData = {}) {
     requireCollection();
+    if (!SESSION_STATUSES.has(status)) throw new Error(`Invalid session status: ${status}`);
 
-    const allowedStatuses = new Set(['scheduled', 'active', 'completed', 'expired', 'cancelled']);
-    if (!allowedStatuses.has(status)) {
-        throw new Error(`Invalid session status: ${status}`);
-    }
+    const patch = {
+        ...additionalData,
+        status,
+        updatedAt: new Date()
+    };
+    delete patch.security;
 
     return scheduledSessionsCollection.updateOne(
-        { sessionId },
-        {
-            $set: {
-                status,
-                updatedAt: new Date(),
-                ...additionalData
-            }
-        }
+        { sessionId: String(sessionId) },
+        { $set: patch }
     );
 }
 
 export async function incrementAccessAttempts(sessionId) {
     requireCollection();
-
     return scheduledSessionsCollection.updateOne(
-        { sessionId },
+        { sessionId: String(sessionId) },
         {
             $inc: { accessAttempts: 1 },
             $set: { updatedAt: new Date() }
@@ -205,28 +272,47 @@ export async function incrementAccessAttempts(sessionId) {
     );
 }
 
+export async function resetAccessAttempts(sessionId) {
+    requireCollection();
+    return scheduledSessionsCollection.updateOne(
+        { sessionId: String(sessionId) },
+        {
+            $set: {
+                accessAttempts: 0,
+                updatedAt: new Date()
+            }
+        }
+    );
+}
+
 export async function startSession(sessionId) {
     requireCollection();
-    return updateSessionStatus(sessionId, 'active', {
-        actualStartTime: new Date()
+    const session = await getScheduledSessionById(sessionId);
+    if (!session) throw new Error('Scheduled session not found');
+    if (session.status === 'active') return session;
+    if (session.status !== 'scheduled') throw new Error(`Cannot start a ${session.status} session`);
+
+    await updateSessionStatus(sessionId, 'active', {
+        actualStartTime: session.actualStartTime || new Date()
     });
+    return getScheduledSessionById(sessionId);
 }
 
 export async function completeSession(sessionId, completionData = {}) {
     requireCollection();
-    return updateSessionStatus(sessionId, 'completed', {
+    await updateSessionStatus(sessionId, 'completed', {
         actualEndTime: new Date(),
         completionData
     });
+    return getScheduledSessionById(sessionId);
 }
 
 export async function getAllScheduledSessions(filters = {}) {
     requireCollection();
-
     const query = {};
+
     if (filters.status) query.status = filters.status;
     if (filters.candidateId) query.candidateId = String(filters.candidateId);
-
     if (filters.dateFrom || filters.dateTo) {
         query.startTime = {};
         if (filters.dateFrom) query.startTime.$gte = toValidDate(filters.dateFrom, 'dateFrom');
@@ -236,11 +322,10 @@ export async function getAllScheduledSessions(filters = {}) {
     return scheduledSessionsCollection.find(query).sort({ startTime: 1 }).toArray();
 }
 
-export async function cleanupExpiredSessions() {
+export async function cleanupExpiredSessions({ deleteAfterDays = 30 } = {}) {
     requireCollection();
-
     const now = new Date();
-    const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const cutoff = new Date(now.getTime() - Math.max(1, Number(deleteAfterDays)) * 24 * 60 * 60 * 1000);
 
     await scheduledSessionsCollection.updateMany(
         {
@@ -257,6 +342,6 @@ export async function cleanupExpiredSessions() {
 
     return scheduledSessionsCollection.deleteMany({
         status: 'expired',
-        updatedAt: { $lt: oneDayAgo }
+        updatedAt: { $lt: cutoff }
     });
 }
