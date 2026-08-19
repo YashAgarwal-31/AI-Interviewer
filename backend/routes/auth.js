@@ -161,19 +161,36 @@ router.post('/logout-all', requirePlatformUser, async (req, res) => {
 router.patch('/profile', requirePlatformUser, async (req, res) => {
   try {
     const update = {};
+    let organizationName = null;
+
     if (req.body?.name !== undefined) {
       const name = String(req.body.name).trim();
       if (!name) return res.status(400).json({ success: false, error: 'Name cannot be empty' });
       update.name = name.slice(0, 120);
     }
+
     if (req.body?.organizationName !== undefined && ['owner', 'admin'].includes(req.platformUser.role)) {
-      update.organizationName = String(req.body.organizationName || '').trim().slice(0, 160) || 'InterviewBuddy';
+      organizationName = String(req.body.organizationName || '').trim().slice(0, 160) || 'InterviewBuddy';
     }
 
-    const user = await User.findByIdAndUpdate(req.platformUser._id, { $set: update }, { new: true });
-    await logAudit({ req, action: 'auth.profile.update', statusCode: 200 });
+    if (organizationName) {
+      await User.updateMany({}, { $set: { organizationName } });
+      update.organizationName = organizationName;
+    }
+
+    const user = Object.keys(update).length
+      ? await User.findByIdAndUpdate(req.platformUser._id, { $set: update }, { new: true })
+      : await User.findById(req.platformUser._id);
+
+    await logAudit({
+      req,
+      action: 'auth.profile.update',
+      statusCode: 200,
+      metadata: { fields: Object.keys(update), organizationWide: Boolean(organizationName) }
+    });
     return res.json({ success: true, user: serializeUser(user) });
   } catch (error) {
+    console.error('Profile update failed:', error);
     return res.status(500).json({ success: false, error: 'Failed to update profile' });
   }
 });
