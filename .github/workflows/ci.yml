@@ -28,6 +28,7 @@ jobs:
       - run: npm ci
       - name: Audit production dependencies
         run: npm audit --omit=dev
+      - run: npm test
       - run: npm run check
 
   frontend:
