@@ -4,10 +4,14 @@ import dotenv from 'dotenv';
 import express from 'express';
 import mongoose from 'mongoose';
 import OpenAI from 'openai';
+import AuditLog from './models/AuditLog.js';
+import AuthSession from './models/AuthSession.js';
+import User from './models/User.js';
 import authRoutes from './routes/auth.js';
 import candidateRoutes, { initializeCandidateRoutes } from './routes/candidates.js';
 import emailRoutes, { closeEmailDatabase } from './routes/email.js';
 import integrationRoutes from './routes/integrations.js';
+import integrityEventRoutes from './routes/integrityEvents.js';
 import liveCompletionRoutes, { initializeLiveCompletionRoutes } from './routes/liveCompletion.js';
 import liveInterviewRoutes, { initializeLiveInterviewRoutes } from './routes/liveInterview.js';
 import platformRoutes, { initializePlatformRoutes } from './routes/platform.js';
@@ -132,7 +136,11 @@ async function connectDatabase() {
   codeQuestionsCollection = db.collection('code_questions');
   interviewResultsCollection = db.collection('interview_results');
   scheduledSessionsCollection = db.collection('scheduled_sessions');
+  // Wait for security-critical unique/TTL indexes before reporting the service healthy.
   await Promise.all([
+    User.init(),
+    AuthSession.init(),
+    AuditLog.init(),
     initializeScheduledSessions(db),
     candidatesCollection.createIndex({ candidateId: 1 }, { unique: true }),
     candidatesCollection.createIndex({ updatedAt: -1 }),
@@ -166,6 +174,7 @@ function initializeRoutes(openai) {
   app.use('/api/sessions/message/:sessionId', requireLiveInterviewAction);
   app.use('/api/sessions/coding-tasks/:sessionId', requireLiveInterviewAction);
   app.use('/api/sessions/end/:sessionId', requireLiveInterviewAction);
+  app.use('/api/sessions', integrityEventRoutes);
   app.use('/api/sessions', liveInterviewRoutes);
   app.use('/api/sessions', liveCompletionRoutes);
   // Legacy session-creation responses use an older URL format. Keep them for
