@@ -5,11 +5,12 @@ import ProtectedRoute from './auth/ProtectedRoute.jsx'
 import PlatformShell from './components/PlatformShell.jsx'
 import SessionScheduler from './components/SessionScheduler.jsx'
 import AuditPage from './pages/AuditPage.jsx'
+import CandidateAccessPage from './pages/CandidateAccessPage.jsx'
 import CandidatesPage from './pages/CandidatesPage.jsx'
 import DashboardPage from './pages/DashboardPage.jsx'
-import HomePage from './pages/HomePage.jsx'
 import RecruiterLogin from './pages/RecruiterLogin.jsx'
 import ResultsPage from './pages/ResultsPage.jsx'
+import SecureInterviewHost from './pages/SecureInterviewHost.jsx'
 import TeamPage from './pages/TeamPage.jsx'
 
 function App() {
@@ -17,9 +18,9 @@ function App() {
     <Router>
       <AuthProvider>
         <Routes>
-          <Route path="/" element={<HomePage />} />
-          <Route path="/interview" element={<HomePage />} />
-          <Route path="/interview-session" element={<HomePage />} />
+          <Route path="/" element={<CandidateAccessPage />} />
+          <Route path="/interview" element={<CandidateAccessPage />} />
+          <Route path="/interview-session" element={<SecureInterviewHost />} />
           <Route path="/platform/login" element={<RecruiterLogin />} />
           <Route path="/admin/schedule" element={<Navigate to="/platform/schedule" replace />} />
 
