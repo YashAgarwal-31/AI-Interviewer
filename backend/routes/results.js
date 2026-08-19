@@ -39,7 +39,7 @@ function summary(doc) {
 
 function queryFromRequest(req) {
   const query = {};
-  const q = String(req.query.q || '').trim();
+  const q = String(req.query.q || '').trim().slice(0, 200);
   if (q) {
     const regex = new RegExp(escapeRegex(q), 'i');
     query.$or = [
@@ -53,6 +53,14 @@ function queryFromRequest(req) {
     ];
   }
   return query;
+}
+
+export function csvCell(value) {
+  let text = String(value ?? '');
+  // Spreadsheet programs can execute cell formulas. Treat exported recruiter
+  // data as text when a user-controlled value starts with a formula marker.
+  if (/^[\s]*[=+\-@]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
 }
 
 router.get('/', canView, async (req, res) => {
@@ -103,7 +111,7 @@ router.get('/export.csv', canView, async (req, res) => {
         ];
       })
     ];
-    const csv = rows.map(row => row.map(value => `"${String(value ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
+    const csv = `\uFEFF${rows.map(row => row.map(csvCell).join(',')).join('\n')}`;
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader('Content-Disposition', `attachment; filename="interview-results-${new Date().toISOString().slice(0, 10)}.csv"`);
     return res.send(csv);
@@ -116,7 +124,8 @@ router.get('/export.csv', canView, async (req, res) => {
 router.get('/:fileName', canView, async (req, res) => {
   try {
     if (!requireDatabase(res)) return;
-    const doc = await interviewResultsCollection.findOne({ fileName: req.params.fileName });
+    const fileName = String(req.params.fileName || '').slice(0, 300);
+    const doc = await interviewResultsCollection.findOne({ fileName });
     if (!doc) return res.status(404).json({ success: false, error: 'Interview result not found' });
     return res.json({ success: true, data: doc });
   } catch (error) {
