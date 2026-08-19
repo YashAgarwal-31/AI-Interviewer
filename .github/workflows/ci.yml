@@ -60,15 +60,19 @@ jobs:
         run: |
           npm ci
           npm audit fix
-      - name: Repair frontend dependencies
+      - name: Repair frontend dependencies including React Router
         working-directory: frontend
         run: |
           npm ci
-          npm audit fix
+          npm audit fix --force
       - name: Verify repaired production audits
         run: |
           cd backend && npm audit --omit=dev --audit-level=high
           cd ../frontend && npm audit --omit=dev --audit-level=high
+      - name: Verify repaired application
+        run: |
+          cd backend && npm run check
+          cd ../frontend && npm run lint && npm run build
       - name: Package repaired manifests
         run: |
           mkdir -p dependency-repair/backend dependency-repair/frontend
