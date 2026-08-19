@@ -46,3 +46,36 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
       - run: npm run lint
       - run: npm run build
+
+  dependency-repair:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.19.0
+      - name: Repair backend dependencies
+        working-directory: backend
+        run: |
+          npm ci
+          npm audit fix
+      - name: Repair frontend dependencies
+        working-directory: frontend
+        run: |
+          npm ci
+          npm audit fix
+      - name: Verify repaired production audits
+        run: |
+          cd backend && npm audit --omit=dev --audit-level=high
+          cd ../frontend && npm audit --omit=dev --audit-level=high
+      - name: Package repaired manifests
+        run: |
+          mkdir -p dependency-repair/backend dependency-repair/frontend
+          cp backend/package.json backend/package-lock.json dependency-repair/backend/
+          cp frontend/package.json frontend/package-lock.json dependency-repair/frontend/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dependency-repair
+          path: dependency-repair
+          retention-days: 1
