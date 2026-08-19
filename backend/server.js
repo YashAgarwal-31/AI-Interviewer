@@ -9,6 +9,7 @@ import candidateRoutes, { initializeCandidateRoutes } from './routes/candidates.
 import emailRoutes, { closeEmailDatabase } from './routes/email.js';
 import integrationRoutes from './routes/integrations.js';
 import liveCompletionRoutes, { initializeLiveCompletionRoutes } from './routes/liveCompletion.js';
+import liveInterviewRoutes, { initializeLiveInterviewRoutes } from './routes/liveInterview.js';
 import platformRoutes, { initializePlatformRoutes } from './routes/platform.js';
 import resultRoutes, { initializeResultRoutes } from './routes/results.js';
 import scheduledSessionsRoutes from './routes/scheduledSessions.js';
@@ -151,6 +152,7 @@ function createOpenAIClient() {
 function initializeRoutes(openai) {
   const collections = { candidatesCollection, codeQuestionsCollection, interviewResultsCollection, scheduledSessionsCollection };
   initializeSessionRoutes(collections, openai);
+  initializeLiveInterviewRoutes(collections, openai);
   initializeLiveCompletionRoutes(collections, openai);
   initializeCandidateRoutes(collections);
   initializeResultRoutes(collections);
@@ -160,9 +162,11 @@ function initializeRoutes(openai) {
   app.use('/api/auth', authRoutes);
   app.use('/api/platform', platformRoutes);
   app.use('/api/sessions/integrations', integrationRoutes);
+  app.use('/api/sessions/initialize-interview/:sessionId', requireLiveInterviewAction);
   app.use('/api/sessions/message/:sessionId', requireLiveInterviewAction);
   app.use('/api/sessions/coding-tasks/:sessionId', requireLiveInterviewAction);
   app.use('/api/sessions/end/:sessionId', requireLiveInterviewAction);
+  app.use('/api/sessions', liveInterviewRoutes);
   app.use('/api/sessions', liveCompletionRoutes);
   // Legacy session-creation responses use an older URL format. Keep them for
   // local compatibility, but prevent them from issuing production credentials.
