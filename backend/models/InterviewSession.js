@@ -130,14 +130,22 @@ const interviewSessionSchema = new Schema({
     }
   },
   security: {
+    accessTokenHash: {
+      type: String,
+      default: null,
+      select: false
+    },
+    // Backward-compatibility only for sessions created before token hashing.
+    // New sessions store only accessTokenHash.
     accessToken: {
       type: String,
-      required: true
+      default: null,
+      select: false
     },
     ipRestrictions: [String],
     maxLoginAttempts: {
       type: Number,
-      default: 3,
+      default: 5,
       min: 1
     },
     loginAttempts: {
@@ -160,7 +168,7 @@ const interviewSessionSchema = new Schema({
 });
 
 interviewSessionSchema.index({ candidateId: 1, 'sessionConfig.scheduledStartTime': 1 });
-interviewSessionSchema.index({ 'security.accessToken': 1 });
+interviewSessionSchema.index({ 'security.accessTokenHash': 1 }, { sparse: true });
 interviewSessionSchema.index({ sessionStatus: 1, 'sessionConfig.scheduledStartTime': 1 });
 
 interviewSessionSchema.virtual('isAccessible').get(function() {
