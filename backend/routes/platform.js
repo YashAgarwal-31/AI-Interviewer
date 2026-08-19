@@ -41,8 +41,8 @@ function safeResult(result) {
   return {
     fileName: result.fileName || null,
     sessionId: result.sessionId || null,
-    candidateName: result.candidateInfo?.name || null,
-    position: result.candidateInfo?.position || null,
+    candidateName: result.candidateInfo?.name || result.candidateName || null,
+    position: result.candidateInfo?.position || result.position || null,
     date: result.savedAt || result.createdAt || null,
     duration: result.interviewDetails?.duration || null,
     questionsAsked: result.interviewDetails?.totalQuestions || 0,
@@ -108,7 +108,7 @@ router.get('/dashboard', requirePlatformUser, async (req, res) => {
   }
 });
 
-router.get('/team', requirePlatformUser, async (req, res) => {
+router.get('/team', requirePlatformUser, requireRoles('owner', 'admin'), async (req, res) => {
   try {
     const users = await User.find({}).sort({ createdAt: 1 });
     return res.json({ success: true, users: users.map(serializeUser) });
@@ -117,7 +117,7 @@ router.get('/team', requirePlatformUser, async (req, res) => {
   }
 });
 
-router.post('/team', requireRoles('owner', 'admin'), async (req, res) => {
+router.post('/team', requirePlatformUser, requireRoles('owner', 'admin'), async (req, res) => {
   try {
     const name = String(req.body?.name || '').trim();
     const email = normalizeEmail(req.body?.email);
@@ -164,7 +164,7 @@ router.post('/team', requireRoles('owner', 'admin'), async (req, res) => {
   }
 });
 
-router.patch('/team/:userId', requireRoles('owner', 'admin'), async (req, res) => {
+router.patch('/team/:userId', requirePlatformUser, requireRoles('owner', 'admin'), async (req, res) => {
   try {
     const target = await User.findById(req.params.userId);
     if (!target) return res.status(404).json({ success: false, error: 'Team member not found' });
@@ -204,7 +204,7 @@ router.patch('/team/:userId', requireRoles('owner', 'admin'), async (req, res) =
   }
 });
 
-router.post('/team/:userId/reset-password', requireRoles('owner', 'admin'), async (req, res) => {
+router.post('/team/:userId/reset-password', requirePlatformUser, requireRoles('owner', 'admin'), async (req, res) => {
   try {
     const target = await User.findById(req.params.userId);
     if (!target) return res.status(404).json({ success: false, error: 'Team member not found' });
@@ -240,7 +240,7 @@ router.post('/team/:userId/reset-password', requireRoles('owner', 'admin'), asyn
   }
 });
 
-router.get('/audit', requireRoles('owner', 'admin'), async (req, res) => {
+router.get('/audit', requirePlatformUser, requireRoles('owner', 'admin'), async (req, res) => {
   try {
     const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
     const logs = await AuditLog.find({}).sort({ createdAt: -1 }).limit(limit).lean();
@@ -265,7 +265,7 @@ router.get('/audit', requireRoles('owner', 'admin'), async (req, res) => {
   }
 });
 
-router.get('/system', requireRoles('owner', 'admin'), async (req, res) => {
+router.get('/system', requirePlatformUser, requireRoles('owner', 'admin'), async (req, res) => {
   const health = req.app.locals.platformHealth || {};
   return res.json({
     success: true,
