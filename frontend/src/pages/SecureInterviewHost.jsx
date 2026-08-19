@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Navigate } from 'react-router-dom'
+import IntegrityEventBridge from '../components/IntegrityEventBridge.jsx'
 import LiveInterviewPage from './LiveInterviewPage.jsx'
 
 export default function SecureInterviewHost() {
@@ -20,5 +21,10 @@ export default function SecureInterviewHost() {
     return <Navigate to="/" replace state={{ message: 'Open the complete secure interview link sent by your recruiter.' }} />
   }
 
-  return <LiveInterviewPage session={session} />
+  return (
+    <>
+      <IntegrityEventBridge session={session} />
+      <LiveInterviewPage session={session} />
+    </>
+  )
 }
