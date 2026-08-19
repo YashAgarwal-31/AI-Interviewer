@@ -36,27 +36,39 @@ export default function CandidateAccessPage() {
     }
 
     let cancelled = false
+    const controller = new AbortController()
+    const timeout = window.setTimeout(() => controller.abort(), 20000)
+
     const accessInterview = async () => {
       try {
         setStatus('checking')
-        const response = await fetch(`${config.AI_BACKEND_URL}/api/sessions/access-by-candidate`, {
+        // New links always contain a sessionId, so resolve the exact session instead
+        // of relying on a candidate-level lookup that can become ambiguous over time.
+        const endpoint = credentials.sessionId
+          ? '/api/sessions/access'
+          : '/api/sessions/access-by-candidate'
+        const body = credentials.sessionId
+          ? { sessionId: credentials.sessionId, accessToken: credentials.accessToken }
+          : { candidateId: credentials.candidateId, accessToken: credentials.accessToken }
+
+        const response = await fetch(`${config.AI_BACKEND_URL}${endpoint}`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'X-Interview-Token': credentials.accessToken
           },
-          body: JSON.stringify({
-            candidateId: credentials.candidateId,
-            sessionId: credentials.sessionId || undefined,
-            accessToken: credentials.accessToken
-          })
+          body: JSON.stringify(body),
+          signal: controller.signal
         })
         const data = await response.json().catch(() => ({ success: false, error: 'Invalid server response' }))
         if (cancelled) return
 
         if (!response.ok || !data.success || !data.session) {
-          if (response.status === 403 && data.sessionInfo) {
-            setSessionInfo(data.sessionInfo)
+          if (response.status === 403 && (data.sessionInfo || data.accessibleFrom)) {
+            setSessionInfo(data.sessionInfo || {
+              scheduledStartTime: null,
+              accessibleFrom: data.accessibleFrom
+            })
             setStatus('timing')
             setMessage(data.error || data.message || 'This interview is outside its allowed access window.')
             return
@@ -77,12 +89,22 @@ export default function CandidateAccessPage() {
       } catch (error) {
         if (cancelled) return
         setStatus('error')
-        setMessage(error.message || 'Unable to access this interview. Ask your recruiter for a fresh invite link.')
+        if (error.name === 'AbortError') {
+          setMessage('The interview service did not respond in time. Check your internet connection and try the secure link again.')
+        } else {
+          setMessage(error.message || 'Unable to access this interview. Ask your recruiter for a fresh invite link.')
+        }
+      } finally {
+        window.clearTimeout(timeout)
       }
     }
 
     accessInterview()
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      controller.abort()
+      window.clearTimeout(timeout)
+    }
   }, [location.state, navigate])
 
   return (
