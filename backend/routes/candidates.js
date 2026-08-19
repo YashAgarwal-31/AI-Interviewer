@@ -1,10 +1,13 @@
 import express from 'express';
 import { ObjectId } from 'mongodb';
-import { requireAdmin } from '../utils/security.js';
+import { requireRoles } from '../utils/security.js';
 
 const router = express.Router();
 let candidatesCollection = null;
 let codeQuestionsCollection = null;
+
+const canManage = requireRoles('owner', 'admin', 'recruiter');
+const canView = requireRoles('owner', 'admin', 'recruiter', 'reviewer');
 
 export function initializeCandidateRoutes(collections = {}) {
   candidatesCollection = collections.candidatesCollection || null;
@@ -30,6 +33,8 @@ function normalizedCandidate(body = {}) {
     ...raw,
     candidateId,
     candidateName,
+    candidateEmail: String(body.candidateEmail || raw.candidateEmail || raw.email || '').trim().toLowerCase() || null,
+    phoneNumber: String(body.phoneNumber || raw.phoneNumber || raw.phone || '').trim() || null,
     position: body.position || raw.position || raw.role || 'Software Developer',
     skills: Array.isArray(body.skills) ? body.skills : (Array.isArray(raw.skills) ? raw.skills : []),
     projectDetails: body.projectDetails ?? raw.projectDetails ?? '',
@@ -45,7 +50,11 @@ function normalizedCandidate(body = {}) {
   };
 }
 
-router.post('/save', requireAdmin, async (req, res) => {
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+router.post('/save', canManage, async (req, res) => {
   try {
     if (!requireDatabase(res)) return;
     const profile = normalizedCandidate(req.body);
@@ -65,7 +74,7 @@ router.post('/save', requireAdmin, async (req, res) => {
   }
 });
 
-router.post('/upload', requireAdmin, async (req, res) => {
+router.post('/upload', canManage, async (req, res) => {
   try {
     if (!requireDatabase(res)) return;
     let rawProfile = req.body?.rawProfile;
@@ -107,7 +116,7 @@ router.post('/upload', requireAdmin, async (req, res) => {
   }
 });
 
-router.get('/load/:candidateId', requireAdmin, async (req, res) => {
+router.get('/load/:candidateId', canView, async (req, res) => {
   try {
     if (!requireDatabase(res)) return;
     const doc = await candidatesCollection.findOne({ candidateId: String(req.params.candidateId) });
@@ -119,18 +128,45 @@ router.get('/load/:candidateId', requireAdmin, async (req, res) => {
   }
 });
 
-router.get('/list', requireAdmin, async (req, res) => {
+router.get('/list', canView, async (req, res) => {
   try {
     if (!requireDatabase(res)) return;
-    const docs = await candidatesCollection.find({}).sort({ updatedAt: -1 }).limit(500).toArray();
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const q = String(req.query.q || '').trim();
+    const query = {};
+
+    if (q) {
+      const regex = new RegExp(escapeRegex(q), 'i');
+      query.$or = [
+        { candidateId: regex },
+        { candidateName: regex },
+        { candidateEmail: regex },
+        { position: regex },
+        { skills: regex }
+      ];
+    }
+
+    const [docs, total] = await Promise.all([
+      candidatesCollection.find(query).sort({ updatedAt: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
+      candidatesCollection.countDocuments(query)
+    ]);
+
     return res.json({
       success: true,
       count: docs.length,
+      total,
+      page,
+      pages: Math.max(1, Math.ceil(total / limit)),
       candidates: docs.map(doc => ({
         candidateId: doc.candidateId,
         candidateName: doc.candidateName,
+        candidateEmail: doc.candidateEmail || null,
+        phoneNumber: doc.phoneNumber || null,
         position: doc.position,
         skills: doc.skills || [],
+        experience: doc.experience || '',
+        education: doc.education || '',
         updatedAt: doc.updatedAt,
         createdAt: doc.createdAt
       }))
@@ -140,7 +176,7 @@ router.get('/list', requireAdmin, async (req, res) => {
   }
 });
 
-router.delete('/delete/:candidateId', requireAdmin, async (req, res) => {
+router.delete('/delete/:candidateId', canManage, async (req, res) => {
   try {
     if (!requireDatabase(res)) return;
     const candidateId = String(req.params.candidateId);
@@ -153,7 +189,7 @@ router.delete('/delete/:candidateId', requireAdmin, async (req, res) => {
   }
 });
 
-router.get('/code-questions/:candidateId', requireAdmin, async (req, res) => {
+router.get('/code-questions/:candidateId', canView, async (req, res) => {
   try {
     if (!codeQuestionsCollection) {
       return res.status(503).json({ success: false, error: 'Code question database is not configured' });
