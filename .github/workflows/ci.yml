@@ -50,7 +50,7 @@ jobs:
       - run: npm run build
 
   candidate-security-migration:
-    if: github.event_name == 'pull_request' && github.actor != 'github-actions[bot]'
+    if: github.actor != 'github-actions[bot]'
     permissions:
       contents: write
     runs-on: ubuntu-latest
