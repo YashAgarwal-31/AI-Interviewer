@@ -80,6 +80,10 @@ export default function ResultsPage() {
     }
   }
 
+  const transcript = detail
+    ? (Array.isArray(detail.fullTranscript) ? detail.fullTranscript : (Array.isArray(detail.transcript) ? detail.transcript : []))
+    : []
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
@@ -138,7 +142,7 @@ export default function ResultsPage() {
               </div>
 
               {(detail.evaluation || detail.summary || detail.recommendation) && <section><h3 className="font-semibold text-slate-900 mb-2">Evaluation</h3><pre className="rounded-xl bg-slate-950 text-slate-100 p-4 text-xs overflow-auto whitespace-pre-wrap">{JSON.stringify(detail.evaluation || detail.summary || { recommendation: detail.recommendation }, null, 2)}</pre></section>}
-              {Array.isArray(detail.transcript) && <section><h3 className="font-semibold text-slate-900 mb-3">Transcript</h3><div className="space-y-2">{detail.transcript.map((item, index) => <div key={index} className="rounded-lg border bg-slate-50 p-3 text-sm"><p className="text-xs font-semibold uppercase text-slate-400">{item.role || item.speaker || 'message'}</p><p className="mt-1 whitespace-pre-wrap text-slate-700">{item.content || item.text || JSON.stringify(item)}</p></div>)}</div></section>}
+              {transcript.length > 0 && <section><h3 className="font-semibold text-slate-900 mb-3">Transcript</h3><div className="space-y-2">{transcript.map((item, index) => <div key={item.sequence || index} className="rounded-lg border bg-slate-50 p-3 text-sm"><p className="text-xs font-semibold uppercase text-slate-400">{item.role || item.speaker || 'message'}</p><p className="mt-1 whitespace-pre-wrap text-slate-700">{item.message || item.content || item.text || JSON.stringify(item)}</p></div>)}</div></section>}
               <section><h3 className="font-semibold text-slate-900 mb-2">Raw result data</h3><details className="rounded-xl border bg-slate-50"><summary className="cursor-pointer px-4 py-3 text-sm font-medium">Open technical payload</summary><pre className="border-t p-4 text-xs overflow-auto whitespace-pre-wrap max-h-[420px]">{JSON.stringify(detail, null, 2)}</pre></details></section>
             </div>
           </aside>
