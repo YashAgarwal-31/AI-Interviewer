@@ -60,15 +60,17 @@ jobs:
         run: |
           npm ci
           npm audit fix
-      - name: Repair frontend dependencies including React Router
+      - name: Repair frontend dependencies including React Router 7
         working-directory: frontend
         run: |
           npm ci
-          npm audit fix --force
+          npm audit fix || true
+          npm install react-router-dom@7.18.2
+          npm audit fix
       - name: Verify repaired production audits
         run: |
-          cd backend && npm audit --omit=dev --audit-level=high
-          cd ../frontend && npm audit --omit=dev --audit-level=high
+          cd backend && npm audit --omit=dev
+          cd ../frontend && npm audit --omit=dev
       - name: Verify repaired application
         run: |
           cd backend && npm run check
