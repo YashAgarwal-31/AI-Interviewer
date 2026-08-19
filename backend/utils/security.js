@@ -1,6 +1,8 @@
 import crypto from 'crypto';
+import { authenticatePlatformRequest } from './auth.js';
 
 const TOKEN_BYTES = 32;
+const RECRUITER_ROLES = new Set(['owner', 'admin', 'recruiter']);
 
 export function generateAccessToken() {
   return crypto.randomBytes(TOKEN_BYTES).toString('hex');
@@ -38,42 +40,92 @@ export function verifyAccessToken(record, providedToken) {
   return false;
 }
 
-function extractAdminKey(req) {
-  const headerKey = req.get('x-admin-key');
-  if (headerKey) return headerKey;
-
-  const auth = req.get('authorization');
-  if (auth && auth.toLowerCase().startsWith('bearer ')) {
-    return auth.slice(7).trim();
-  }
-
-  return '';
+function serverAdminAuthenticated(req) {
+  const expectedKey = process.env.ADMIN_API_KEY;
+  const providedKey = req.get('x-admin-key');
+  return Boolean(expectedKey && providedKey && safeEqual(providedKey, expectedKey));
 }
 
-export function requireAdmin(req, res, next) {
-  const expectedKey = process.env.ADMIN_API_KEY;
+async function platformAuth(req) {
+  if (req.platformUser && req.platformSession) {
+    return { user: req.platformUser, session: req.platformSession };
+  }
+  return authenticatePlatformRequest(req);
+}
 
-  if (!expectedKey) {
-    if (process.env.NODE_ENV === 'production') {
-      return res.status(503).json({
-        success: false,
-        error: 'Admin API is not configured on the server'
-      });
+function attachPlatformIdentity(req, auth) {
+  req.platformUser = auth.user;
+  req.platformSession = auth.session;
+  req.actor = {
+    type: 'user',
+    user: auth.user,
+    email: auth.user.email
+  };
+}
+
+export async function requirePlatformUser(req, res, next) {
+  try {
+    const auth = await platformAuth(req);
+    if (!auth) {
+      return res.status(401).json({ success: false, error: 'Sign in is required' });
     }
+    attachPlatformIdentity(req, auth);
+    return next();
+  } catch (error) {
+    console.error('Platform authentication failed:', error);
+    return res.status(500).json({ success: false, error: 'Authentication service failed' });
+  }
+}
 
-    // Local development remains convenient, while production fails closed.
+export function requireRoles(...roles) {
+  const allowed = new Set(roles);
+  return async (req, res, next) => {
+    try {
+      const auth = await platformAuth(req);
+      if (!auth) {
+        return res.status(401).json({ success: false, error: 'Sign in is required' });
+      }
+      attachPlatformIdentity(req, auth);
+      if (!allowed.has(auth.user.role)) {
+        return res.status(403).json({ success: false, error: 'You do not have permission for this action' });
+      }
+      return next();
+    } catch (error) {
+      console.error('Role authorization failed:', error);
+      return res.status(500).json({ success: false, error: 'Authorization service failed' });
+    }
+  };
+}
+
+export async function requireAdmin(req, res, next) {
+  if (serverAdminAuthenticated(req)) {
+    req.actor = { type: 'server-admin', email: null };
     return next();
   }
 
-  const providedKey = extractAdminKey(req);
-  if (!safeEqual(providedKey, expectedKey)) {
-    return res.status(401).json({
-      success: false,
-      error: 'Admin authentication required'
-    });
+  try {
+    const auth = await platformAuth(req);
+    if (auth) {
+      attachPlatformIdentity(req, auth);
+      if (!RECRUITER_ROLES.has(auth.user.role)) {
+        return res.status(403).json({ success: false, error: 'Recruiter access is required' });
+      }
+      return next();
+    }
+  } catch (error) {
+    console.error('Admin authentication failed:', error);
+    return res.status(500).json({ success: false, error: 'Authentication service failed' });
   }
 
-  return next();
+  if (process.env.NODE_ENV !== 'production' && !process.env.ADMIN_API_KEY) {
+    req.actor = { type: 'server-admin', email: 'local-development' };
+    return next();
+  }
+
+  return res.status(401).json({
+    success: false,
+    error: 'Recruiter authentication required'
+  });
 }
 
 export function isDemoEnabled() {
