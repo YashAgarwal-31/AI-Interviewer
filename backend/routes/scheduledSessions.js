@@ -95,12 +95,10 @@ router.post('/create', requireAdmin, async (req, res) => {
         }
         const scheduleError = validateSchedule(sessionData.startTime, sessionData.endTime);
         if (scheduleError) return res.status(400).json({ success: false, error: scheduleError });
-
         const existingSession = await getScheduledSessionByCandidate(sessionData.candidateId);
         if (existingSession) {
             return res.status(409).json({ success: false, error: 'Candidate already has an active or scheduled session', existingSession: publicSession(existingSession) });
         }
-
         const createdSession = await createScheduledSession(sessionData);
         const accessUrl = buildAccessUrl(createdSession, createdSession.accessToken);
         return res.status(201).json({ success: true, message: 'Scheduled session created successfully', session: { ...publicSession(createdSession), accessUrl } });
@@ -121,6 +119,12 @@ router.post('/access', async (req, res) => {
             return res.status(401).json({ success: false, error: 'Invalid interview access token' });
         }
 
+        // Failed-token counters are telemetry, not a permanent account lock. A
+        // valid high-entropy token clears them before timing validation so an
+        // attacker cannot deny access by sending a few incorrect guesses.
+        await resetAccessAttempts(session.sessionId);
+        session.accessAttempts = 0;
+
         const validation = validateSessionTiming(session);
         if (!validation.isValid) {
             if (validation.shouldExpire) await updateSessionStatus(session.sessionId, 'expired');
@@ -129,7 +133,6 @@ router.post('/access', async (req, res) => {
 
         let activeSession = session;
         if (session.status === 'scheduled') activeSession = await startSession(session.sessionId);
-        await resetAccessAttempts(session.sessionId);
         return res.json({ success: true, message: 'Session access granted', session: publicSession(activeSession, accessToken, validation), interviewData: activeSession.interviewData || null, initialMessage: `Hello ${activeSession.candidateName}! Welcome to your technical interview for the ${activeSession.position} position. Let's begin.` });
     } catch (error) {
         console.error('Error accessing scheduled session:', error);
@@ -183,30 +186,17 @@ router.put('/update/:sessionId', requireAdmin, async (req, res) => {
     try {
         const existing = await getScheduledSessionById(req.params.sessionId);
         if (!existing) return res.status(404).json({ success: false, error: 'Session not found' });
-        if (['completed', 'expired', 'cancelled'].includes(existing.status)) {
-            return res.status(409).json({ success: false, error: `A ${existing.status} interview cannot be modified` });
-        }
-
+        if (['completed', 'expired', 'cancelled'].includes(existing.status)) return res.status(409).json({ success: false, error: `A ${existing.status} interview cannot be modified` });
         const updateData = { ...req.body };
         const requestedStatus = updateData.status;
-        delete updateData.status;
-        delete updateData.security;
-        delete updateData.accessAttempts;
-        delete updateData.maxAccessAttempts;
-        delete updateData.sessionId;
-        delete updateData.candidateId;
-        delete updateData.createdAt;
-
+        delete updateData.status; delete updateData.security; delete updateData.accessAttempts; delete updateData.maxAccessAttempts; delete updateData.sessionId; delete updateData.candidateId; delete updateData.createdAt;
         if (updateData.startTime) updateData.startTime = new Date(updateData.startTime);
         if (updateData.endTime) updateData.endTime = new Date(updateData.endTime);
         const start = updateData.startTime || existing.startTime;
         const end = updateData.endTime || existing.endTime;
         const scheduleError = validateSchedule(start, end, { requireFuture: requestedStatus !== 'cancelled' });
         if (scheduleError && requestedStatus !== 'cancelled') return res.status(400).json({ success: false, error: scheduleError });
-
-        if (requestedStatus && !['scheduled', 'active', 'cancelled'].includes(requestedStatus)) {
-            return res.status(400).json({ success: false, error: 'Only scheduled, active, or cancelled are valid recruiter status changes' });
-        }
+        if (requestedStatus && !['scheduled', 'active', 'cancelled'].includes(requestedStatus)) return res.status(400).json({ success: false, error: 'Only scheduled, active, or cancelled are valid recruiter status changes' });
         if (requestedStatus) await updateSessionStatus(req.params.sessionId, requestedStatus);
         if (Object.keys(updateData).length > 0) await patchScheduledSession(req.params.sessionId, updateData);
         const updated = await getScheduledSessionById(req.params.sessionId);
