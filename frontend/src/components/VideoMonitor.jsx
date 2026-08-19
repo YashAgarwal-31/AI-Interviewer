@@ -1,5 +1,3 @@
-import * as cocoSsd from '@tensorflow-models/coco-ssd'
-import '@tensorflow/tfjs'
 import { useEffect, useRef, useState } from 'react'
 
 const FACE_INTERVAL_MS = 250
@@ -27,10 +25,13 @@ const VideoMonitor = ({ stream }) => {
 
     const loadModels = async () => {
       try {
-        const [{ FaceDetection }, objectDetector] = await Promise.all([
+        const [faceModule, cocoSsd] = await Promise.all([
           import('@mediapipe/face_detection'),
-          cocoSsd.load()
+          import('@tensorflow-models/coco-ssd'),
+          import('@tensorflow/tfjs')
         ])
+        const { FaceDetection } = faceModule
+        const objectDetector = await cocoSsd.load()
         if (cancelled) return
 
         const faceDetector = new FaceDetection({
