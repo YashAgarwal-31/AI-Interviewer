@@ -5,6 +5,7 @@ import {
   ClipboardList,
   LogOut,
   Menu,
+  Settings,
   ShieldCheck,
   Users,
   X
@@ -15,11 +16,12 @@ import { useAuth } from '../auth/AuthContext'
 
 const navigation = [
   { to: '/platform', label: 'Dashboard', icon: BarChart3, end: true },
-  { to: '/platform/schedule', label: 'Interviews', icon: CalendarDays },
+  { to: '/platform/schedule', label: 'Interviews', icon: CalendarDays, roles: ['owner', 'admin', 'recruiter'] },
   { to: '/platform/candidates', label: 'Candidates', icon: Users },
   { to: '/platform/results', label: 'Results', icon: ClipboardList },
   { to: '/platform/team', label: 'Team', icon: ShieldCheck, roles: ['owner', 'admin'] },
-  { to: '/platform/audit', label: 'Audit log', icon: Activity, roles: ['owner', 'admin'] }
+  { to: '/platform/audit', label: 'Audit log', icon: Activity, roles: ['owner', 'admin'] },
+  { to: '/platform/settings', label: 'Settings', icon: Settings }
 ]
 
 export default function PlatformShell() {
@@ -40,7 +42,7 @@ export default function PlatformShell() {
         </div>
       </div>
 
-      <nav className="flex-1 px-3 py-4 space-y-1">
+      <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
         {items.map(({ to, label, icon: Icon, end }) => (
           <NavLink
             key={to}
