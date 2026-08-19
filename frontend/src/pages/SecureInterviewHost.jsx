@@ -1,38 +1,24 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { Navigate } from 'react-router-dom'
-import HomePage from './HomePage.jsx'
-
-const LEGACY_HYDRATION_WINDOW_MS = 15000
+import LiveInterviewPage from './LiveInterviewPage.jsx'
 
 export default function SecureInterviewHost() {
-  const [hasSession] = useState(() => {
-    // Clear any stale credential left behind by an interrupted previous mount.
-    localStorage.removeItem('interviewSession')
-
-    const session = sessionStorage.getItem('interviewSession')
-    if (!session) return false
-
-    // HomePage is a large legacy component that still reads this single key from
-    // localStorage after its backend health check. Mirror the tab-scoped session
-    // only for a bounded hydration window, then remove it automatically.
-    localStorage.setItem('interviewSession', session)
-    return true
+  const [session] = useState(() => {
+    const stored = sessionStorage.getItem('interviewSession')
+    if (!stored) return null
+    try {
+      const parsed = JSON.parse(stored)
+      if (!parsed?.sessionId || !parsed?.accessToken) return null
+      return parsed
+    } catch {
+      sessionStorage.removeItem('interviewSession')
+      return null
+    }
   })
 
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      localStorage.removeItem('interviewSession')
-    }, LEGACY_HYDRATION_WINDOW_MS)
-
-    return () => {
-      window.clearTimeout(timer)
-      localStorage.removeItem('interviewSession')
-    }
-  }, [])
-
-  if (!hasSession) {
+  if (!session) {
     return <Navigate to="/" replace state={{ message: 'Open the complete secure interview link sent by your recruiter.' }} />
   }
 
-  return <HomePage />
+  return <LiveInterviewPage session={session} />
 }
