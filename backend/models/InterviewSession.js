@@ -132,8 +132,7 @@ const interviewSessionSchema = new Schema({
   security: {
     accessToken: {
       type: String,
-      required: true,
-      select: false
+      required: true
     },
     ipRestrictions: [String],
     maxLoginAttempts: {
