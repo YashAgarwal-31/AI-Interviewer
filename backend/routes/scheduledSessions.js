@@ -25,10 +25,10 @@ const frontendBaseUrl = () => (
 function buildAccessUrl(session, accessToken) {
     const params = new URLSearchParams({
         candidateId: String(session.candidateId),
-        sessionId: String(session.sessionId),
-        accessToken: String(accessToken)
+        sessionId: String(session.sessionId)
     });
-    return `${frontendBaseUrl()}/?${params.toString()}`;
+    const fragment = new URLSearchParams({ accessToken: String(accessToken) });
+    return `${frontendBaseUrl()}/?${params.toString()}#${fragment.toString()}`;
 }
 
 function publicSession(session, accessToken = null, validation = null) {
