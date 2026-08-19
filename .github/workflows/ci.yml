@@ -9,6 +9,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   backend:
     runs-on: ubuntu-latest
@@ -16,16 +19,15 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 20.19.0
           cache: npm
           cache-dependency-path: backend/package-lock.json
       - run: npm ci
       - name: Audit production dependencies
-        continue-on-error: true
-        run: npm audit --omit=dev --audit-level=high
+        run: npm audit --omit=dev
       - run: npm run check
 
   frontend:
@@ -34,60 +36,14 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: 20.19.0
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
       - name: Audit production dependencies
-        continue-on-error: true
-        run: npm audit --omit=dev --audit-level=high
+        run: npm audit --omit=dev
       - run: npm run lint
       - run: npm run build
-
-  dependency-repair:
-    if: github.event_name == 'pull_request' && github.actor != 'github-actions[bot]'
-    permissions:
-      contents: write
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: agent/full-code-fixes
-          persist-credentials: true
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20.19.0
-      - name: Repair backend dependencies
-        working-directory: backend
-        run: |
-          npm ci
-          npm audit fix
-      - name: Repair frontend dependencies including React Router 7
-        working-directory: frontend
-        run: |
-          npm ci
-          npm audit fix || true
-          npm install react-router-dom@7.18.2
-          npm audit fix
-      - name: Verify repaired production audits
-        run: |
-          cd backend && npm audit --omit=dev
-          cd ../frontend && npm audit --omit=dev
-      - name: Verify repaired application
-        run: |
-          cd backend && npm run check
-          cd ../frontend && npm run lint && npm run build
-      - name: Commit repaired manifests
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add backend/package.json backend/package-lock.json frontend/package.json frontend/package-lock.json
-          if git diff --cached --quiet; then
-            echo "Dependency manifests are already repaired"
-          else
-            git commit -m "Update dependencies for security advisories"
-            git push origin HEAD:agent/full-code-fixes
-          fi
