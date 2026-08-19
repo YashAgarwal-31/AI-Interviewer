@@ -11,6 +11,7 @@ import DashboardPage from './pages/DashboardPage.jsx'
 import RecruiterLogin from './pages/RecruiterLogin.jsx'
 import ResultsPage from './pages/ResultsPage.jsx'
 import SecureInterviewHost from './pages/SecureInterviewHost.jsx'
+import SettingsPage from './pages/SettingsPage.jsx'
 import TeamPage from './pages/TeamPage.jsx'
 
 function App() {
@@ -29,6 +30,7 @@ function App() {
               <Route index element={<DashboardPage />} />
               <Route path="candidates" element={<CandidatesPage />} />
               <Route path="results" element={<ResultsPage />} />
+              <Route path="settings" element={<SettingsPage />} />
 
               <Route element={<ProtectedRoute roles={['owner', 'admin', 'recruiter']} />}>
                 <Route path="schedule" element={<SessionScheduler />} />
