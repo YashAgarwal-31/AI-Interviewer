@@ -1,38 +1,58 @@
-# InterviewBuddy – AI-Powered Technical Interview Platform
+# InterviewBuddy – AI Interview Operations Platform
 
-InterviewBuddy is a full-stack technical interview platform for running secure, time-bound AI interviews with voice interaction, coding exercises, candidate monitoring, session scheduling, and persistent interview results.
+InterviewBuddy is a full-stack recruiting and technical-interview platform for running secure, time-bound AI interviews with named recruiter accounts, role-based access, candidate management, voice interaction, coding exercises, browser monitoring, persistent results, and an operational audit trail.
 
-## Key Features
+The current architecture is intended as a production-oriented **single-workspace platform** for one recruiting team. See [DEPLOYMENT.md](./DEPLOYMENT.md) before onboarding real candidates.
+
+## Platform Features
+
+### Recruiter workspace
+- Secure named recruiter accounts and expiring server-side sessions
+- Roles: **Owner**, **Admin**, **Recruiter**, and **Reviewer**
+- Dashboard with candidate/interview/result/team KPIs
+- Interview scheduling, filtering, invitation, reminder, and cancellation workflows
+- Searchable/paginated candidate management
+- Searchable/paginated interview results and CSV export
+- Team administration, role changes, account disable/enable, and password resets
+- Account settings, self-service password changes, and sign-out-everywhere
+- Owner/admin audit and system-status views
 
 ### AI interview experience
-- Candidate-aware technical questions generated from profile, skills, experience, and projects
-- Conversational follow-up questions through the OpenAI API
-- Browser speech recognition and text-to-speech support
-- Coding task synchronization with an external code-editor experience
-- Interview transcript and session-result persistence
+- Candidate-aware technical questions based on profile, skills, experience, and projects
+- Conversational follow-ups through the OpenAI API
+- Browser speech recognition and text-to-speech
+- Coding-task synchronization with an external code-editor experience
+- Interview transcript and result persistence
+- Graceful local fallback prompts when OpenAI is not configured during development
 
 ### Interview integrity
 - MediaPipe face detection
 - TensorFlow.js / COCO-SSD object detection
 - Browser audio-level monitoring
-- Monitoring models are loaded on demand so the initial application bundle stays lightweight
+- Monitoring models loaded on demand to reduce initial bundle cost
+- Throttled inference so monitoring is lighter on candidate laptops
 
-### Secure session management
-- Time-bound interview sessions
-- Cryptographically random invitation tokens
-- New session tokens are stored as hashes rather than plaintext
-- Candidate IDs are identifiers only; they do not grant interview access by themselves
-- Token rotation when a new invitation/reminder is issued
+### Secure candidate access
+- Time-bound scheduled interview sessions
+- Cryptographically random invitation credentials
+- New candidate access tokens stored as hashes rather than plaintext
+- Candidate IDs are identifiers only; they cannot unlock interviews
+- Token rotation whenever a new invitation/reminder is issued
+- Dedicated secure candidate-entry screen before the interview UI is mounted
+- New invite secrets transported in the URL fragment (`#accessToken=...`) so hosting servers do not receive them in the HTTP request URL
+- Invite credentials scrubbed from browser history after capture
+- Candidate session credentials kept tab-scoped in `sessionStorage`
 - Failed-access tracking and request rate limiting
-- Recruiter/admin routes protected by `ADMIN_API_KEY`
-- Demo access disabled by default in production
+- Token-bearing invite URLs deliberately excluded from email logs
 
-### Recruiter tools
-- Candidate profile management
-- Interview scheduling UI at `/admin/schedule`
-- Secure candidate-link generation
-- Optional Resend email invitations and reminders
-- Protected interview result APIs
+### Recruiter authentication and security
+- Password hashing with Node.js `scrypt` and per-user random salts
+- Strong-password policy and repeated-login lockout
+- Random opaque recruiter bearer sessions; only session-token hashes are stored
+- MongoDB TTL expiry for recruiter sessions and audit records
+- Session revocation after password resets/account disable actions
+- Least-privilege RBAC across candidate, result, interview, team, and audit APIs
+- `ADMIN_API_KEY` retained primarily for first-owner bootstrap/recovery rather than normal recruiter usage
 
 ## Tech Stack
 
@@ -41,16 +61,37 @@ InterviewBuddy is a full-stack technical interview platform for running secure, 
 - Vite 7
 - React Router 7
 - Tailwind CSS
+- Lucide React
 - MediaPipe
 - TensorFlow.js / COCO-SSD
 - Three.js / React Three Fiber
 
 ### Backend
-- Node.js 20+
+- Node.js 20.19+
 - Express
 - MongoDB / Mongoose
 - OpenAI API
 - Resend (optional email delivery)
+- Node `crypto` / `scrypt` for authentication primitives
+
+## Main Routes
+
+### Candidate
+- `/` – secure invite validation
+- `/interview` – secure invite validation alias
+- `/interview-session` – authenticated interview workspace
+
+### Recruiter platform
+- `/platform/login` – recruiter sign-in / first-owner bootstrap
+- `/platform` – dashboard
+- `/platform/schedule` – interview operations
+- `/platform/candidates` – candidate management
+- `/platform/results` – interview results
+- `/platform/team` – owner/admin team management
+- `/platform/audit` – owner/admin audit and system status
+- `/platform/settings` – profile, password, and session settings
+
+The old `/admin/schedule` URL redirects to the authenticated platform scheduler.
 
 ## Repository Structure
 
@@ -58,15 +99,23 @@ InterviewBuddy is a full-stack technical interview platform for running secure, 
 AI-Interviewer/
 ├── backend/
 │   ├── models/
-│   │   └── InterviewSession.js
+│   │   ├── AuditLog.js
+│   │   ├── AuthSession.js
+│   │   ├── InterviewSession.js
+│   │   └── User.js
 │   ├── routes/
+│   │   ├── auth.js
 │   │   ├── candidates.js
 │   │   ├── email.js
 │   │   ├── integrations.js
+│   │   ├── platform.js
 │   │   ├── results.js
 │   │   ├── scheduledSessions.js
 │   │   └── sessions.js
+│   ├── tests/
+│   │   └── auth.test.js
 │   ├── utils/
+│   │   ├── auth.js
 │   │   ├── emailService.js
 │   │   ├── security.js
 │   │   └── sessionScheduler.js
@@ -75,6 +124,7 @@ AI-Interviewer/
 │   └── server.js
 ├── frontend/
 │   ├── src/
+│   │   ├── auth/
 │   │   ├── components/
 │   │   ├── pages/
 │   │   ├── App.jsx
@@ -94,9 +144,9 @@ AI-Interviewer/
 
 - Node.js `>=20.19`
 - npm
-- MongoDB connection string for database-backed functionality
-- OpenAI API key if you want AI-generated responses instead of local fallback prompts
-- Resend API key only if you want email invitations
+- MongoDB for database-backed workflows
+- OpenAI API key for the complete AI experience
+- Resend API key only if you need email invitations/reminders
 
 ### Backend
 
@@ -107,20 +157,25 @@ npm install
 npm run dev
 ```
 
-The backend runs on `http://localhost:3000` by default.
-
-Important local variables:
+Important local settings:
 
 ```env
 NODE_ENV=development
 PORT=3000
 MONGO_URI=mongodb://localhost:27017
 MONGO_DB_NAME=ai_interviewer
+MONGO_MAX_POOL_SIZE=20
 ADMIN_API_KEY=replace-with-a-long-random-secret
+AUTH_SESSION_HOURS=12
 OPENAI_API_KEY=
+OPENAI_INTERVIEW_MODEL=gpt-4.1-mini
+OPENAI_TIMEOUT_MS=45000
+OPENAI_MAX_RETRIES=2
 FRONTEND_URL=http://localhost:5173
 ENABLE_DEMO_MODE=false
 ```
+
+Backend default: `http://localhost:3000`
 
 ### Frontend
 
@@ -131,57 +186,56 @@ npm install
 npm run dev
 ```
 
-Frontend environment:
-
 ```env
 VITE_AI_BACKEND_URL=http://localhost:3000
 VITE_CODE_EDITOR_URL=https://ai-code-editor-psi-two.vercel.app/
 ```
 
-The Vite development server runs on `http://localhost:5173` by default.
+Frontend default: `http://localhost:5173`
 
-## Recruiter / Admin Flow
+## First Owner Setup
 
-1. Configure `ADMIN_API_KEY` on the backend.
-2. Open `/admin/schedule` in the frontend.
-3. Enter the same admin key when prompted.
-4. Create a time-bound candidate session.
-5. Copy the generated secure candidate link or send it through the protected email API.
-6. Treat the candidate URL like a password because it contains the one-time session credential.
+1. Configure a long random `ADMIN_API_KEY` on the backend.
+2. Open `/platform/login`.
+3. If no owner exists, the page enters one-time bootstrap mode.
+4. Create the owner account using the private server admin key.
+5. After the owner exists, use named recruiter accounts for normal operations; do not distribute the server key.
 
-The admin key is entered at runtime and stored only in browser session storage; it is not compiled into the frontend JavaScript bundle.
+## Typical Recruiter Flow
 
-## Candidate Flow
+1. Sign in at `/platform/login`.
+2. Create/import a candidate profile.
+3. Schedule an interview from **Interviews**.
+4. Copy the generated secure candidate URL or email it through Resend.
+5. The candidate opens the complete signed link; candidate ID alone is rejected.
+6. The candidate completes voice/technical/coding portions of the interview.
+7. Review the persisted result under **Results** and export CSV if needed.
+8. Owners/admins can inspect recruiter actions under **Audit log**.
 
-Candidates should enter through the secure invitation URL. The link contains:
-
-- candidate ID
-- session ID
-- secure access token
-
-The backend validates both session timing and the access token before starting the interview. Entering a candidate ID alone is intentionally insufficient.
+Resending an invite/reminder rotates the candidate access token and invalidates the previous link.
 
 ## Production Deployment
 
-The repository includes deployment configuration for:
+The repository includes:
 
-- **Render** backend through `render.yaml`
-- **Vercel** frontend through `frontend/vercel.json`
-- **MongoDB** for persistent candidate/session/result data
+- **Render** backend blueprint via `render.yaml`
+- **Vercel** frontend configuration via `frontend/vercel.json`
+- **MongoDB** persistence for users, recruiter sessions, candidates, interview sessions, results, and audit history
 
-See **[DEPLOYMENT.md](./DEPLOYMENT.md)** for the complete production checklist, required environment variables, CORS setup, health checks, and deployment sequence.
+See **[DEPLOYMENT.md](./DEPLOYMENT.md)** for the exact deployment order, first-owner bootstrap, required environment variables, production smoke test, and scaling notes.
 
-Production intentionally fails closed if MongoDB cannot initialize, preventing the service from appearing healthy while interview results cannot be persisted.
+Production fails closed if required configuration or MongoDB initialization is unavailable.
 
 ## CI / Quality Gates
 
-GitHub Actions runs separate backend and frontend jobs.
+GitHub Actions is read-only and blocks failures in the following checks.
 
 Backend:
 
 ```bash
 npm ci
 npm audit --omit=dev
+npm test
 npm run check
 ```
 
@@ -194,23 +248,31 @@ npm run lint
 npm run build
 ```
 
-Production dependency audits are blocking CI checks.
-
-## Security Notes
-
-- Never commit `.env` files or API keys.
-- Keep `ENABLE_DEMO_MODE=false` in production.
-- Use a long random value for `ADMIN_API_KEY`.
-- Candidate invitation URLs must not be shared publicly.
-- Email logs intentionally do not store token-bearing candidate URLs.
-- Issuing a new invite/reminder rotates the candidate token and can invalidate older links.
+The backend tests cover password policy, password hashing/verification, email normalization, and interview access-token verification.
 
 ## Health Check
-
-After the backend starts:
 
 ```text
 GET /api/health
 ```
 
-A production deployment returns a healthy status only when the required database connection is available.
+The response reports backend health plus MongoDB, OpenAI/email configuration state, uptime, and deployment version metadata when available.
+
+## Production Scope
+
+This version is designed for a **single recruiting organization on a normal single backend deployment with concurrent candidates/recruiters**. It includes database-backed authentication, persistence, pooling, indexes, rate limits, audit history, and deployment health checks.
+
+Before inviting real candidates, complete the smoke test in `DEPLOYMENT.md` on the actual Render/Vercel/MongoDB deployment, including Chrome/Edge device permissions, microphone/camera, interview access timing, coding flow, result persistence, and email token rotation.
+
+For a future public multi-company SaaS or multi-instance/multi-region backend, add organization-level tenant isolation and a shared coordination/rate-limit store such as Redis before onboarding unrelated companies into the same deployment.
+
+## Security Notes
+
+- Never commit `.env` files, API keys, recruiter passwords, or candidate invitation URLs.
+- Keep `ENABLE_DEMO_MODE=false` in production.
+- Candidate IDs are not passwords.
+- Keep `ADMIN_API_KEY` private and use it only for bootstrap/recovery workflows.
+- Candidate invitation credentials are hashed at rest and rotated on resend/reminder.
+- New invite secrets use URL fragments and are removed from browser history after capture.
+- Email logs do not persist the token-bearing URL.
+- Keep MongoDB backups and provider monitoring enabled for real production use.
