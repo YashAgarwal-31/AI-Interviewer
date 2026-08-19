@@ -46,10 +46,10 @@ function parseScheduledSlot(slot) {
 function buildSecureUrl(session, accessToken) {
   const params = new URLSearchParams({
     candidateId: String(session.candidateId),
-    sessionId: String(session.sessionId),
-    accessToken: String(accessToken)
+    sessionId: String(session.sessionId)
   });
-  return `${frontendBaseUrl()}/?${params.toString()}`;
+  const fragment = new URLSearchParams({ accessToken: String(accessToken) });
+  return `${frontendBaseUrl()}/?${params.toString()}#${fragment.toString()}`;
 }
 
 async function createFromCandidate(candidate) {
@@ -74,10 +74,12 @@ async function createFromCandidate(candidate) {
     throw new Error('Provide scheduledInterviewDate, startTime, or call_tracking.interview_details.scheduled_slot');
   }
 
-  const duration = Math.max(15, Number(candidate.duration) || 60);
+  const duration = Math.max(15, Math.min(240, Number(candidate.duration) || 60));
   const endTime = candidate.endTime
     ? parseMongoDate(candidate.endTime)
     : new Date(startTime.getTime() + duration * 60000);
+  if (endTime <= startTime) throw new Error('Interview end time must be after start time');
+  if (endTime <= new Date()) throw new Error('Interview end time must be in the future');
 
   const session = await createScheduledSession({
     candidateId: candidate.candidateId,
@@ -87,7 +89,6 @@ async function createFromCandidate(candidate) {
     position: candidate.role || candidate.position || 'Software Developer',
     startTime,
     endTime,
-    duration,
     skills: Array.isArray(candidate.techStack) ? candidate.techStack : (candidate.skills || []),
     experienceLevel: candidate.experience || 'intermediate',
     focusAreas: candidate.focusAreas || ['technical', 'problem-solving'],
