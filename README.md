@@ -14,40 +14,29 @@ The project is built as a **production-oriented single-workspace platform** with
 
 ## Product Preview
 
-### AI interview experience
-![AI interviewer for candidate](Images/Ai-interviewer%20for%20candidate.png)
-
-### Interview scheduling
-![AI interview scheduler](Images/Ai-interview%20scheduler.png)
-
-### AI-powered coding assessment
-![AI powered coding assessment](Images/Ai%20powered%20coding%20assesment.png)
-
-<details>
-<summary><strong>More product screens</strong></summary>
-<br />
-
-**Candidate interview entry**
-
-![Candidate interview entry](Images/candidate%20entry%20for%20interview%20session.png)
-
-**Candidate shortlisting**
-
-![Candidate shortlisting](Images/Candidate%20shortlisting.png)
-
-**Interview scheduling workflow**
-
-![Interview scheduling workflow](Images/Interview%20Scheduling%20process.png)
-
-**Candidate project/code AI analysis**
-
-![Candidate project code AI analysis](Images/candidate%20project%20code%20AI%20analysis.png)
-
-**Recruiter and candidate portal**
-
+### Recruiter & Candidate Portal
 ![Recruiter and candidate portal](Images/job%20portal%20for%20recruiter%20and%20candidate.png)
 
-</details>
+### Candidate Shortlisting
+![Candidate shortlisting](Images/Candidate%20shortlisting.png)
+
+### Interview Scheduling Process
+![Interview scheduling workflow](Images/Interview%20Scheduling%20process.png)
+
+### AI Interview Scheduler
+![AI interview scheduler](Images/Ai-interview%20scheduler.png)
+
+### Secure Candidate Interview Entry
+![Candidate interview entry](Images/candidate%20entry%20for%20interview%20session.png)
+
+### AI Interview Experience
+![AI interviewer for candidate](Images/Ai-interviewer%20for%20candidate.png)
+
+### AI-Powered Coding Assessment
+![AI powered coding assessment](Images/Ai%20powered%20coding%20assesment.png)
+
+### Candidate Project & Code AI Analysis
+![Candidate project code AI analysis](Images/candidate%20project%20code%20AI%20analysis.png)
 
 ## How It Works
 
