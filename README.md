@@ -1,287 +1,216 @@
-# InterviewBuddy – AI-Powered Interview Preparation Platform
+# InterviewBuddy – AI-Powered Technical Interview Platform
 
-A comprehensive AI-powered technical interview platform that conducts real-time interviews with candidates, featuring voice interaction, code assessment, behavioral monitoring, and automated result generation for recruiters.
+InterviewBuddy is a full-stack technical interview platform for running secure, time-bound AI interviews with voice interaction, coding exercises, candidate monitoring, session scheduling, and persistent interview results.
 
-## 🌟 Features
+## Key Features
 
-### Core Interview Capabilities
-- **AI-Powered Interviews**: GPT-4 driven conversational interviews tailored to candidate profiles
-- **Real-time Voice Interaction**: Speech-to-text and text-to-speech for natural conversation flow
-- **Live Coding Assessment**: Integrated code editor with multiple programming language support
-- **Behavioral Monitoring**: Face detection and object detection to ensure interview integrity
+### AI interview experience
+- Candidate-aware technical questions generated from profile, skills, experience, and projects
+- Conversational follow-up questions through the OpenAI API
+- Browser speech recognition and text-to-speech support
+- Coding task synchronization with an external code-editor experience
+- Interview transcript and session-result persistence
 
-### Interview Management
-- **Session Scheduling**: Schedule interviews with email notifications
-- **Candidate Profiles**: Upload and manage detailed candidate profiles with skills, projects, and experience
-- **Custom Questions**: Generate AI-tailored questions based on candidate background
-- **Interview Results**: Automated transcription, AI-refined summaries, and recruiter-friendly reports
+### Interview integrity
+- MediaPipe face detection
+- TensorFlow.js / COCO-SSD object detection
+- Browser audio-level monitoring
+- Monitoring models are loaded on demand so the initial application bundle stays lightweight
 
-### Technical Monitoring
-- **Video Surveillance**: Real-time face and object detection during interviews
-- **Code Editor Integration**: Live coding exercises with test case validation
-- **Session Recording**: Complete interview transcripts and coding submissions
-- **Email Integration**: Automated notifications using Resend API
+### Secure session management
+- Time-bound interview sessions
+- Cryptographically random invitation tokens
+- New session tokens are stored as hashes rather than plaintext
+- Candidate IDs are identifiers only; they do not grant interview access by themselves
+- Token rotation when a new invitation/reminder is issued
+- Failed-access tracking and request rate limiting
+- Recruiter/admin routes protected by `ADMIN_API_KEY`
+- Demo access disabled by default in production
 
-## 📸 Platform Screenshots
+### Recruiter tools
+- Candidate profile management
+- Interview scheduling UI at `/admin/schedule`
+- Secure candidate-link generation
+- Optional Resend email invitations and reminders
+- Protected interview result APIs
 
-<div align="center">
-
-### 🏢 Job Portal for Recruiters & Candidates
-<table>
-<tr>
-<td>
-<a href="https://ai-technical-interviewer-seven.vercel.app/">
-<img src="./Images/job portal for recruiter and candidate.png" alt="Job Portal" width="800"/>
-</a>
-</td>
-</tr>
-</table>
-<em>Comprehensive job portal with role-based access for both recruiters and candidates</em>
-
-### 👥 Candidate Shortlisting Process
-<table>
-<tr>
-<td>
-<img src="./Images/Candidate shortlisting.png" alt="Candidate Shortlisting" width="800"/>
-</td>
-</tr>
-</table>
-<em>AI-powered candidate evaluation and shortlisting based on skills and experience</em>
-
-### 📅 AI Interview Scheduler
-<table>
-<tr>
-<td>
-<a href="https://ai-interview-caller.vercel.app/">
-<img src="./Images/Ai-interview scheduler.png" alt="Interview Scheduler" width="800"/>
-</a>
-</td>
-</tr>
-</table>
-<em>Intelligent interview scheduling with automated calendar integration</em>
-
-### 📋 Interview Scheduling Process
-<table>
-<tr>
-<td>
-<img src="./Images/Interview Scheduling process.png" alt="Interview Scheduling Process" width="800"/>
-</td>
-</tr>
-</table>
-<em>Step-by-step interview scheduling workflow with email notifications</em>
-
-### 🚪 Candidate Entry for Interview Session
-<table>
-<tr>
-<td>
-<img src="./Images/candidate entry for interview session.png" alt="Candidate Entry" width="800"/>
-</td>
-</tr>
-</table>
-<em>Secure candidate authentication and interview session access portal</em>
-
-### 🤖 AI Interviewer for Candidates
-<table>
-<tr>
-<td>
-<img src="./Images/Ai-interviewer for candidate.png" alt="AI Interviewer" width="800"/>
-</td>
-</tr>
-</table>
-<em>Interactive AI-powered interview interface with real-time conversation</em>
-
-### 💻 AI-Powered Coding Assessment
-<table>
-<tr>
-<td>
-<a href="https://ai-technical-interviewer.vercel.app/">
-<img src="./Images/Ai powered coding assesment.png" alt="Coding Assessment" width="800"/>
-</a>
-</td>
-</tr>
-</table>
-<em>Advanced coding challenges with real-time evaluation and feedback</em>
-
-### 🔍 AI Powered Candidate Project Code Analysis
-<table>
-<tr>
-<td>
-<img src="./Images/candidate project code AI analysis.png" alt="Code Analysis" width="800"/>
-</td>
-</tr>
-</table>
-<em>Intelligent code analysis and technical skill assessment</em>
-
-</div>
-
-## 🚀 Tech Stack
-
-### Backend
-- **Node.js** with **Express.js** - RESTful API server
-- **OpenAI GPT-4** - AI interview conductor
-- **MongoDB** with **Mongoose** - Database for profiles and results
-- **Resend** - Email service for notifications
-- **CORS** - Cross-origin resource sharing
+## Tech Stack
 
 ### Frontend
-- **React 19** - Modern UI framework
-- **Vite** - Fast build tool and development server
-- **TailwindCSS** - Utility-first CSS framework
-- **Three.js** with **@react-three/fiber** - 3D avatar rendering
-- **MediaPipe** - Face detection capabilities
-- **TensorFlow.js** - Object detection models
-- **Lucide React** - Modern icon library
+- React 19
+- Vite 7
+- React Router 7
+- Tailwind CSS
+- MediaPipe
+- TensorFlow.js / COCO-SSD
+- Three.js / React Three Fiber
 
-## 📋 Prerequisites
+### Backend
+- Node.js 20+
+- Express
+- MongoDB / Mongoose
+- OpenAI API
+- Resend (optional email delivery)
 
-- **Node.js** (v16 or higher)
-- **npm** or **yarn**
-- **MongoDB** (optional - falls back to filesystem storage)
-- **OpenAI API Key**
-- **Resend API Key** (for email features)
+## Repository Structure
 
-## 🛠️ Installation
-
-### 1. Install Dependencies
-```bash
-# Install all dependencies (frontend and backend)
-cd backend && npm run setup
-```
-
-Or install separately:
-```bash
-# Backend dependencies
-cd backend
-npm install
-
-# Frontend dependencies
-cd ../frontend
-npm install
-```
-
-### 2. Environment Configuration
-
-Copy the environment template:
-```bash
-cd backend
-cp .env.example .env
-```
-
-Configure your `.env` file:
-```env
-# OpenAI API Configuration (Required)
-OPENAI_API_KEY=your_openai_api_key_here
-
-# Email Configuration (Optional)
-RESEND_API_KEY=your_resend_api_key_here
-FROM_EMAIL=noreply@yourcompany.com
-
-# MongoDB Configuration (Optional - uses filesystem if omitted)
-MONGO_URI=mongodb://localhost:27017/ai_interviewer
-MONGO_DB_NAME=ai_interviewer
-
-# Frontend URLs
-FRONTEND_URL=http://localhost:5173
-PRODUCTION_FRONTEND_URL=https://your-production-url.com
-
-# Server Configuration
-PORT=3000
-```
-
-### 4. Start the Application
-
-**Development Mode (Both servers):**
-```bash
-cd backend
-npm run dev:full
-```
-
-**Start Individually:**
-```bash
-# Backend server
-cd backend
-npm run dev
-
-# Frontend development server (in new terminal)
-cd frontend
-npm run dev
-```
-
-## 🎯 Usage Guide
-
-### For Recruiters
-
-#### 1. Candidate Profile Management
-- Upload candidate profiles via JSON files
-- Create detailed profiles with skills, experience, and project details
-- Generate AI-tailored interview questions automatically
-
-#### 2. Interview Setup
-- Schedule interviews with automatic email notifications
-- Configure custom questions and coding challenges
-- Set interview parameters (duration, difficulty level)
-
-#### 3. Session Management
-- Access live interviews for monitoring
-- Review real-time candidate performance
-- Export interview results and assessments
-
-### For Candidates
-
-#### 1. Interview Access
-- Join interviews using session ID and access token
-- Complete pre-interview setup and equipment checks
-- Participate in voice-based technical discussions
-
-#### 2. Coding Assessments
-- Solve programming challenges in integrated code editor
-- Multiple language support (JavaScript, Python, Java, etc.)
-- Real-time code execution and test validation
-
-#### 3. Behavioral Monitoring
-- Face detection ensures candidate presence
-- Object detection maintains interview integrity
-- 3D avatar provides engaging interview experience
-
-## 🏗️ Project Structure
-
-```
+```text
 AI-Interviewer/
 ├── backend/
 │   ├── models/
-│   │   └── InterviewSession.js    # MongoDB schema for sessions
+│   │   └── InterviewSession.js
 │   ├── routes/
-│   │   ├── sessions.js            # Interview session routes
-│   │   ├── email.js               # Email notification routes
-│   │   ├── integrations.js        # External integrations
-│   │   └── scheduledSessions.js   # Session scheduling
+│   │   ├── candidates.js
+│   │   ├── email.js
+│   │   ├── integrations.js
+│   │   ├── results.js
+│   │   ├── scheduledSessions.js
+│   │   └── sessions.js
 │   ├── utils/
-│   │   ├── emailService.js        # Email service utilities
-│   │   └── sessionScheduler.js    # Session scheduling logic
-│   ├── candidate-profiles/        # Candidate profile storage
-│   ├── interview-results/         # Interview result storage
-│   ├── server.js                  # Main server file
-│   ├── package.json               # Backend dependencies
-│   └── .env.example               # Environment template
+│   │   ├── emailService.js
+│   │   ├── security.js
+│   │   └── sessionScheduler.js
+│   ├── .env.example
+│   ├── package.json
+│   └── server.js
 ├── frontend/
 │   ├── src/
 │   │   ├── components/
-│   │   │   ├── InterviewSession.jsx    # Main interview interface
-│   │   │   ├── AIAvatar3D.jsx          # 3D avatar component
-│   │   │   ├── FaceDetector.jsx        # Face detection monitoring
-│   │   │   ├── ObjectDetector.jsx      # Object detection monitoring
-│   │   │   ├── VideoMonitor.jsx        # Video monitoring panel
-│   │   │   ├── MonitoringPanel.jsx     # Behavioral monitoring
-│   │   │   └── SessionScheduler.jsx    # Interview scheduling
 │   │   ├── pages/
-│   │   │   ├── HomePage.jsx            # Landing page
-│   │   │   └── InterviewSetup.jsx      # Interview configuration
-│   │   ├── App.jsx                     # Main application component
-│   │   ├── config.js                   # Frontend configuration
-│   │   └── main.jsx                    # Application entry point
-│   ├── package.json                    # Frontend dependencies
-│   ├── vite.config.js                  # Vite configuration
-│   ├── tailwind.config.js              # TailwindCSS configuration
-│   └── index.html                      # HTML template
-└── README.md                           # Project documentation
+│   │   ├── App.jsx
+│   │   └── config.js
+│   ├── .env.example
+│   ├── package.json
+│   └── vercel.json
+├── .github/workflows/ci.yml
+├── DEPLOYMENT.md
+├── render.yaml
+└── README.md
 ```
+
+## Local Development
+
+### Prerequisites
+
+- Node.js `>=20.19`
+- npm
+- MongoDB connection string for database-backed functionality
+- OpenAI API key if you want AI-generated responses instead of local fallback prompts
+- Resend API key only if you want email invitations
+
+### Backend
+
+```bash
+cd backend
+cp .env.example .env
+npm install
+npm run dev
+```
+
+The backend runs on `http://localhost:3000` by default.
+
+Important local variables:
+
+```env
+NODE_ENV=development
+PORT=3000
+MONGO_URI=mongodb://localhost:27017
+MONGO_DB_NAME=ai_interviewer
+ADMIN_API_KEY=replace-with-a-long-random-secret
+OPENAI_API_KEY=
+FRONTEND_URL=http://localhost:5173
+ENABLE_DEMO_MODE=false
+```
+
+### Frontend
+
+```bash
+cd frontend
+cp .env.example .env
+npm install
+npm run dev
+```
+
+Frontend environment:
+
+```env
+VITE_AI_BACKEND_URL=http://localhost:3000
+VITE_CODE_EDITOR_URL=https://ai-code-editor-psi-two.vercel.app/
+```
+
+The Vite development server runs on `http://localhost:5173` by default.
+
+## Recruiter / Admin Flow
+
+1. Configure `ADMIN_API_KEY` on the backend.
+2. Open `/admin/schedule` in the frontend.
+3. Enter the same admin key when prompted.
+4. Create a time-bound candidate session.
+5. Copy the generated secure candidate link or send it through the protected email API.
+6. Treat the candidate URL like a password because it contains the one-time session credential.
+
+The admin key is entered at runtime and stored only in browser session storage; it is not compiled into the frontend JavaScript bundle.
+
+## Candidate Flow
+
+Candidates should enter through the secure invitation URL. The link contains:
+
+- candidate ID
+- session ID
+- secure access token
+
+The backend validates both session timing and the access token before starting the interview. Entering a candidate ID alone is intentionally insufficient.
+
+## Production Deployment
+
+The repository includes deployment configuration for:
+
+- **Render** backend through `render.yaml`
+- **Vercel** frontend through `frontend/vercel.json`
+- **MongoDB** for persistent candidate/session/result data
+
+See **[DEPLOYMENT.md](./DEPLOYMENT.md)** for the complete production checklist, required environment variables, CORS setup, health checks, and deployment sequence.
+
+Production intentionally fails closed if MongoDB cannot initialize, preventing the service from appearing healthy while interview results cannot be persisted.
+
+## CI / Quality Gates
+
+GitHub Actions runs separate backend and frontend jobs.
+
+Backend:
+
+```bash
+npm ci
+npm audit --omit=dev
+npm run check
+```
+
+Frontend:
+
+```bash
+npm ci
+npm audit --omit=dev
+npm run lint
+npm run build
+```
+
+Production dependency audits are blocking CI checks.
+
+## Security Notes
+
+- Never commit `.env` files or API keys.
+- Keep `ENABLE_DEMO_MODE=false` in production.
+- Use a long random value for `ADMIN_API_KEY`.
+- Candidate invitation URLs must not be shared publicly.
+- Email logs intentionally do not store token-bearing candidate URLs.
+- Issuing a new invite/reminder rotates the candidate token and can invalidate older links.
+
+## Health Check
+
+After the backend starts:
+
+```text
+GET /api/health
+```
+
+A production deployment returns a healthy status only when the required database connection is available.
