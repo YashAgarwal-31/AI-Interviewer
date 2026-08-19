@@ -60,5 +60,11 @@ const userSchema = new Schema({
 });
 
 userSchema.index({ role: 1, isActive: 1 });
+// This deployment is intentionally a single workspace. Enforce that invariant
+// at the database layer so simultaneous bootstrap requests cannot create two owners.
+userSchema.index(
+  { role: 1 },
+  { unique: true, partialFilterExpression: { role: 'owner' }, name: 'single_platform_owner' }
+);
 
 export default model('User', userSchema);
