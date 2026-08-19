@@ -1,20 +1,20 @@
 // Configuration for API endpoints
-const removeTrailingSlash = (url) => url.endsWith('/') ? url.slice(0, -1) : url
+const removeTrailingSlash = (url = '') => url.endsWith('/') ? url.slice(0, -1) : url
 
-const rawBackendUrl = import.meta.env.VITE_AI_BACKEND_URL || 'http://localhost:3000'
-const cleanBackendUrl = removeTrailingSlash(rawBackendUrl)
+const aiBackendUrl = removeTrailingSlash(
+  import.meta.env.VITE_AI_BACKEND_URL || 'http://localhost:3000'
+)
 
-// Debug logging for production
-if (import.meta.env.PROD) {
-  console.log('🔧 Backend URL Config:')
-  console.log('Raw VITE_AI_BACKEND_URL:', rawBackendUrl)
-  console.log('Cleaned AI_BACKEND_URL:', cleanBackendUrl)
-}
+const recruiterBackendUrl = removeTrailingSlash(
+  import.meta.env.VITE_RECRUITER_BACKEND_URL || 'http://localhost:5000'
+)
 
-const config = {
-  AI_BACKEND_URL: cleanBackendUrl,
-  RECRUITER_BACKEND_URL: removeTrailingSlash(import.meta.env.VITE_RECRUITER_BACKEND_URL || 'http://localhost:5000'),
-  CODE_EDITOR_URL: import.meta.env.AI_CodeEditor_API || 'https://ai-code-editor-psi-two.vercel.app/'
-}
+const codeEditorUrl = import.meta.env.VITE_CODE_EDITOR_URL || 'https://ai-code-editor-psi-two.vercel.app/'
+
+const config = Object.freeze({
+  AI_BACKEND_URL: aiBackendUrl,
+  RECRUITER_BACKEND_URL: recruiterBackendUrl,
+  CODE_EDITOR_URL: codeEditorUrl
+})
 
 export default config
