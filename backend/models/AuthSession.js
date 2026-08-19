@@ -5,7 +5,6 @@ const authSessionSchema = new Schema({
     type: String,
     required: true,
     unique: true,
-    index: true,
     select: false
   },
   userId: {
@@ -16,8 +15,7 @@ const authSessionSchema = new Schema({
   },
   expiresAt: {
     type: Date,
-    required: true,
-    index: true
+    required: true
   },
   lastSeenAt: {
     type: Date,
