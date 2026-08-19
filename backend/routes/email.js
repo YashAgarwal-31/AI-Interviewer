@@ -49,10 +49,10 @@ function candidateName(candidate) {
 function buildSecureUrl(session, accessToken) {
   const params = new URLSearchParams({
     candidateId: String(session.candidateId),
-    sessionId: String(session.sessionId),
-    accessToken: String(accessToken)
+    sessionId: String(session.sessionId)
   });
-  return `${frontendBaseUrl()}/?${params.toString()}`;
+  const fragment = new URLSearchParams({ accessToken: String(accessToken) });
+  return `${frontendBaseUrl()}/?${params.toString()}#${fragment.toString()}`;
 }
 
 async function resolveCandidateAndSession(candidateId, sessionId = null) {
