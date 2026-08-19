@@ -1,708 +1,350 @@
 import express from 'express';
-import { MongoClient } from 'mongodb';
+import { MongoClient, ObjectId } from 'mongodb';
 import emailService from '../utils/emailService.js';
+import { hashAccessToken, requireAdmin } from '../utils/security.js';
+import {
+  getScheduledSessionByCandidate,
+  getScheduledSessionById,
+  rotateScheduledAccessToken,
+  updateSessionStatus
+} from '../utils/sessionScheduler.js';
 
 const router = express.Router();
+let emailMongoClient = null;
+let emailDb = null;
 
-// MongoDB connection
-const getDatabase = async () => {
-    const mongoUri = process.env.MONGO_URI || process.env.MONGODB_URI || 'mongodb://localhost:27017';
-    const dbName = process.env.MONGO_DB_NAME || 'test';
-    
-    console.log(`🔌 Connecting to MongoDB: ${mongoUri.replace(/\/\/[^:]+:[^@]+@/, '//***:***@')} DB: ${dbName}`);
-    
-    const client = new MongoClient(mongoUri);
-    await client.connect();
-    return client.db(dbName);
-};
+const frontendBaseUrl = () => (
+  process.env.PRODUCTION_FRONTEND_URL || process.env.FRONTEND_URL || 'http://localhost:5173'
+).replace(/\/$/, '');
 
-/**
- * Send session invite email to candidate
- * POST /api/email/send-session-invite
- * Body: { candidateId, sessionId }
- */
-router.post('/send-session-invite', async (req, res) => {
-    try {
-        const { candidateId, sessionId } = req.body;
+async function getDatabase() {
+  if (emailDb) return emailDb;
+  const uri = process.env.MONGO_URI || process.env.MONGODB_URI;
+  if (!uri) throw new Error('MONGO_URI is required for email workflows');
 
-        if (!candidateId || !sessionId) {
-            return res.status(400).json({
-                success: false,
-                message: 'candidateId and sessionId are required'
-            });
-        }
+  emailMongoClient = new MongoClient(uri);
+  await emailMongoClient.connect();
+  emailDb = emailMongoClient.db(process.env.MONGO_DB_NAME || 'ai_interviewer');
+  return emailDb;
+}
 
-        console.log(`📧 Processing email request for candidate: ${candidateId}, session: ${sessionId}`);
+async function findCandidate(db, candidateId) {
+  const id = String(candidateId);
+  let candidate = await db.collection('candidates').findOne({ candidateId: id });
+  if (candidate) return candidate;
 
-        // Get database connection
-        const db = await getDatabase();
+  if (ObjectId.isValid(id)) {
+    candidate = await db.collection('shortlistedcandidates').findOne({ _id: new ObjectId(id) });
+  }
+  return candidate;
+}
 
-        // Find candidate details
-        const candidate = await db.collection('candidates').findOne({
-            candidateId: candidateId
-        });
+function candidateEmail(candidate) {
+  return candidate?.email || candidate?.candidateEmail || null;
+}
 
-        if (!candidate) {
-            return res.status(404).json({
-                success: false,
-                message: 'Candidate not found'
-            });
-        }
+function candidateName(candidate) {
+  return candidate?.name || candidate?.full_name || candidate?.candidateName || 'Candidate';
+}
 
-        // Find scheduled session
-        const scheduledSession = await db.collection('scheduled_sessions').findOne({
-            sessionId: sessionId,
-            candidateId: candidateId
-        });
+function buildSecureUrl(session, accessToken) {
+  const params = new URLSearchParams({
+    candidateId: String(session.candidateId),
+    sessionId: String(session.sessionId)
+  });
+  const fragment = new URLSearchParams({ accessToken: String(accessToken) });
+  return `${frontendBaseUrl()}/?${params.toString()}#${fragment.toString()}`;
+}
 
-        if (!scheduledSession) {
-            return res.status(404).json({
-                success: false,
-                message: 'Scheduled session not found'
-            });
-        }
+async function resolveCandidateAndSession(candidateId, sessionId = null) {
+  const db = await getDatabase();
+  const session = sessionId
+    ? await getScheduledSessionById(sessionId)
+    : await getScheduledSessionByCandidate(candidateId);
 
-        // Check if session is still valid (not expired)
-        const now = new Date();
-        const sessionEndTime = new Date(scheduledSession.endTime);
-        
-        if (now > sessionEndTime) {
-            return res.status(400).json({
-                success: false,
-                message: 'Session has already expired'
-            });
-        }
+  if (!session || String(session.candidateId) !== String(candidateId)) {
+    const error = new Error('Scheduled session not found for this candidate');
+    error.status = 404;
+    throw error;
+  }
 
-        // Generate session URL - prioritize production URL
-        const baseUrl = process.env.PRODUCTION_FRONTEND_URL || process.env.FRONTEND_URL || 'http://localhost:5173';
-        const sessionUrl = `${baseUrl}?candidateId=${candidateId}&sessionId=${sessionId}`;
+  if (session.status !== 'scheduled') {
+    const error = new Error('Invites and reminders can only be sent before an interview starts');
+    error.status = 409;
+    throw error;
+  }
 
-        // Prepare candidate data for email
-        const candidateData = {
-            name: candidate.name || candidate.full_name || 'Dear Candidate',
-            email: candidate.email || candidate.candidateEmail,
-            candidateId: candidateId
-        };
+  if (new Date(session.endTime) <= new Date()) {
+    await updateSessionStatus(session.sessionId, 'expired');
+    const error = new Error('This interview has already ended. Schedule a new interview before sending an invite.');
+    error.status = 409;
+    throw error;
+  }
 
-        // Prepare session details
-        const sessionDetails = {
-            startTime: scheduledSession.startTime,
-            endTime: scheduledSession.endTime,
-            duration: scheduledSession.duration || 60,
-            sessionId: sessionId
-        };
+  const candidate = await findCandidate(db, candidateId);
+  const email = candidateEmail(candidate) || session.candidateEmail;
+  if (!email) {
+    const error = new Error('Candidate email is not available');
+    error.status = 400;
+    throw error;
+  }
 
-        // Validate candidate has email
-        if (!candidateData.email) {
-            return res.status(400).json({
-                success: false,
-                message: 'Candidate email not found'
-            });
-        }
+  return { db, session, candidate, email };
+}
 
-        console.log(`📤 Sending session invite to: ${candidateData.email}`);
-        console.log(`🔗 Session URL: ${sessionUrl}`);
+async function rollbackTokenRotation(db, session, issuedToken) {
+  const issuedHash = hashAccessToken(issuedToken);
+  const previousHash = session.security?.accessTokenHash || null;
+  const filter = {
+    sessionId: session.sessionId,
+    'security.accessTokenHash': issuedHash
+  };
 
-        // Send email using emailService
-        const emailResult = await emailService.sendSessionInvite(
-            candidateData,
-            sessionUrl,
-            sessionDetails
-        );
-
-        if (emailResult.success) {
-            // Update scheduled session with email sent status
-            await db.collection('scheduled_sessions').updateOne(
-                { sessionId: sessionId },
-                { 
-                    $set: { 
-                        emailSent: true,
-                        emailSentAt: new Date(),
-                        emailMessageId: emailResult.messageId,
-                        sessionUrl: sessionUrl
-                    }
-                }
-            );
-
-            console.log(`✅ Email sent successfully to ${candidateData.email}`);
-
-            res.json({
-                success: true,
-                message: 'Session invite email sent successfully',
-                data: {
-                    candidateId: candidateId,
-                    candidateName: candidateData.name,
-                    candidateEmail: candidateData.email,
-                    sessionId: sessionId,
-                    sessionUrl: sessionUrl,
-                    emailMessageId: emailResult.messageId,
-                    sessionDetails: sessionDetails
-                }
-            });
-        } else {
-            console.error(`❌ Failed to send email to ${candidateData.email}:`, emailResult.error);
-
-            res.status(500).json({
-                success: false,
-                message: 'Failed to send session invite email',
-                error: emailResult.error,
-                data: {
-                    candidateId: candidateId,
-                    candidateEmail: candidateData.email,
-                    sessionId: sessionId
-                }
-            });
-        }
-
-    } catch (error) {
-        console.error('❌ Error in send-session-invite:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Internal server error',
-            error: error.message
-        });
-    }
-});
-
-/**
- * Send session reminder email
- * POST /api/email/send-reminder
- * Body: { candidateId, sessionId, minutesUntilStart }
- */
-router.post('/send-reminder', async (req, res) => {
-    try {
-        const { candidateId, sessionId, minutesUntilStart = 15 } = req.body;
-
-        if (!candidateId || !sessionId) {
-            return res.status(400).json({
-                success: false,
-                message: 'candidateId and sessionId are required'
-            });
-        }
-
-        const db = await getDatabase();
-
-        // Find candidate and session
-        const candidate = await db.collection('candidates').findOne({
-            candidateId: candidateId
-        });
-
-        const scheduledSession = await db.collection('scheduled_sessions').findOne({
-            sessionId: sessionId,
-            candidateId: candidateId
-        });
-
-        if (!candidate || !scheduledSession) {
-            return res.status(404).json({
-                success: false,
-                message: 'Candidate or session not found'
-            });
-        }
-
-        const baseUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
-        const sessionUrl = `${baseUrl}?candidateId=${candidateId}&sessionId=${sessionId}`;
-
-        const candidateData = {
-            name: candidate.name || candidate.full_name || 'Dear Candidate',
-            email: candidate.email || candidate.candidateEmail,
-            candidateId: candidateId
-        };
-
-        const sessionDetails = {
-            startTime: scheduledSession.startTime,
-            endTime: scheduledSession.endTime,
-            duration: scheduledSession.duration || 60
-        };
-
-        const emailResult = await emailService.sendSessionReminder(
-            candidateData,
-            sessionUrl,
-            sessionDetails,
-            minutesUntilStart
-        );
-
-        if (emailResult.success) {
-            await db.collection('scheduled_sessions').updateOne(
-                { sessionId: sessionId },
-                { 
-                    $push: { 
-                        reminders: {
-                            sentAt: new Date(),
-                            minutesUntilStart: minutesUntilStart,
-                            messageId: emailResult.messageId
-                        }
-                    }
-                }
-            );
-
-            res.json({
-                success: true,
-                message: 'Reminder email sent successfully',
-                data: {
-                    candidateId: candidateId,
-                    sessionId: sessionId,
-                    minutesUntilStart: minutesUntilStart,
-                    messageId: emailResult.messageId
-                }
-            });
-        } else {
-            res.status(500).json({
-                success: false,
-                message: 'Failed to send reminder email',
-                error: emailResult.error
-            });
-        }
-
-    } catch (error) {
-        console.error('❌ Error in send-reminder:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Internal server error',
-            error: error.message
-        });
-    }
-});
-
-/**
- * Send bulk session invites
- * POST /api/email/send-bulk-invites
- * Body: { sessions: [{ candidateId, sessionId }] }
- */
-router.post('/send-bulk-invites', async (req, res) => {
-    try {
-        const { sessions } = req.body;
-
-        if (!Array.isArray(sessions) || sessions.length === 0) {
-            return res.status(400).json({
-                success: false,
-                message: 'sessions array is required and must not be empty'
-            });
-        }
-
-        console.log(`📧 Processing bulk email request for ${sessions.length} sessions`);
-
-        const results = [];
-        const errors = [];
-
-        for (const session of sessions) {
-            try {
-                const { candidateId, sessionId } = session;
-
-                // Simulate individual email send request
-                const emailRequest = {
-                    body: { candidateId, sessionId },
-                    // Mock response object
-                    status: (code) => ({ json: (data) => ({ statusCode: code, data }) }),
-                    json: (data) => ({ statusCode: 200, data })
-                };
-
-                // This would normally call the individual send function
-                // For now, we'll add to results with pending status
-                results.push({
-                    candidateId,
-                    sessionId,
-                    status: 'pending',
-                    message: 'Queued for processing'
-                });
-
-            } catch (error) {
-                errors.push({
-                    candidateId: session.candidateId,
-                    sessionId: session.sessionId,
-                    error: error.message
-                });
-            }
-        }
-
-        res.json({
-            success: true,
-            message: `Bulk email processing initiated for ${sessions.length} sessions`,
-            data: {
-                processed: results.length,
-                errors: errors.length,
-                results: results,
-                errors: errors
-            }
-        });
-
-    } catch (error) {
-        console.error('❌ Error in send-bulk-invites:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Internal server error',
-            error: error.message
-        });
-    }
-});
-
-/**
- * Test email routes are working
- * GET /api/email/test
- */
-router.get('/test', async (req, res) => {
-    try {
-        console.log('🧪 Email routes are working!');
-        res.json({
-            success: true,
-            message: 'Email routes are accessible',
-            timestamp: new Date().toISOString(),
-            endpoints: [
-                'GET /api/email/test',
-                'POST /api/email/send-candidate-session',
-                'POST /api/email/send-session-invite',
-                'GET /api/email/status/:sessionId'
-            ]
-        });
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: 'Email routes test failed',
-            error: error.message
-        });
-    }
-});
-
-/**
- * Test email configuration
- * GET /api/email/test-config
- */
-router.get('/test-config', async (req, res) => {
-    try {
-        console.log('🧪 Testing email configuration...');
-        
-        const testResult = await emailService.testEmailConfiguration();
-
-        res.json({
-            success: testResult.success,
-            message: testResult.success ? 'Email configuration is working' : 'Email configuration failed',
-            data: testResult,
-            config: {
-                hasResendApiKey: !!process.env.RESEND_API_KEY,
-                fromEmail: process.env.FROM_EMAIL || 'Not configured'
-            }
-        });
-
-    } catch (error) {
-        console.error('❌ Error testing email config:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Failed to test email configuration',
-            error: error.message
-        });
-    }
-});
-
-/**
- * Get email status for a session
- * GET /api/email/status/:sessionId
- */
-router.get('/status/:sessionId', async (req, res) => {
-    try {
-        const { sessionId } = req.params;
-
-        const db = await getDatabase();
-        const scheduledSession = await db.collection('scheduled_sessions').findOne({
-            sessionId: sessionId
-        });
-
-        if (!scheduledSession) {
-            return res.status(404).json({
-                success: false,
-                message: 'Session not found'
-            });
-        }
-
-        res.json({
-            success: true,
-            data: {
-                sessionId: sessionId,
-                emailSent: scheduledSession.emailSent || false,
-                emailSentAt: scheduledSession.emailSentAt || null,
-                emailMessageId: scheduledSession.emailMessageId || null,
-                reminders: scheduledSession.reminders || [],
-                sessionUrl: scheduledSession.sessionUrl || null
-            }
-        });
-
-    } catch (error) {
-        console.error('❌ Error getting email status:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Internal server error',
-            error: error.message
-        });
-    }
-});
-
-/**
- * Debug endpoint for send-candidate-session (GET requests)
- */
-router.get('/send-candidate-session', (req, res) => {
-    console.log('⚠️ GET request received on send-candidate-session endpoint');
-    console.log('Query params:', req.query);
-    console.log('Headers:', req.headers);
-    
-    res.status(405).json({
-        success: false,
-        message: 'Method not allowed. This endpoint requires POST method.',
-        expectedMethod: 'POST',
-        receivedMethod: 'GET',
-        correctEndpoint: 'POST /api/email/send-candidate-session'
+  if (previousHash) {
+    await db.collection('scheduled_sessions').updateOne(filter, {
+      $set: {
+        'security.accessTokenHash': previousHash,
+        updatedAt: new Date()
+      }
     });
-});
+  } else {
+    await db.collection('scheduled_sessions').updateOne(filter, {
+      $unset: { 'security.accessTokenHash': '' },
+      $set: { updatedAt: new Date() }
+    });
+  }
+}
 
-/**
- * Send candidate session URL to candidate's email with their ID
- * POST /api/email/send-candidate-session
- * Body: { candidateId, recruiterEmail, message }
- */
-router.post('/send-candidate-session', async (req, res) => {
-    try {
-        console.log(`📧 Email endpoint called with body:`, req.body);
-        
-        const { candidateId, recruiterEmail, message } = req.body;
+async function sendInvite({ candidateId, sessionId = null, reminderMinutes = null }) {
+  const { db, session, candidate, email } = await resolveCandidateAndSession(candidateId, sessionId);
+  const token = await rotateScheduledAccessToken(session.sessionId);
+  const secureUrl = buildSecureUrl(session, token);
+  const candidateData = {
+    name: candidateName(candidate) || session.candidateName,
+    email,
+    candidateId: String(candidateId)
+  };
+  const sessionDetails = {
+    startTime: session.startTime,
+    endTime: session.endTime,
+    duration: session.duration || 60,
+    sessionId: session.sessionId
+  };
 
-        if (!candidateId) {
-            console.log('❌ Missing candidateId in request');
-            return res.status(400).json({
-                success: false,
-                message: 'candidateId is required'
-            });
+  let result;
+  try {
+    result = reminderMinutes === null
+      ? await emailService.sendSessionInvite(candidateData, secureUrl, sessionDetails)
+      : await emailService.sendSessionReminder(candidateData, secureUrl, sessionDetails, reminderMinutes);
+  } catch (error) {
+    await rollbackTokenRotation(db, session, token).catch(rollbackError => {
+      console.error('Failed to restore previous interview token after email error:', rollbackError);
+    });
+    throw error;
+  }
+
+  if (!result.success) {
+    await rollbackTokenRotation(db, session, token).catch(rollbackError => {
+      console.error('Failed to restore previous interview token after email rejection:', rollbackError);
+    });
+    const error = new Error(result.error || 'Failed to send email');
+    error.status = 502;
+    throw error;
+  }
+
+  const sentAt = new Date();
+  await db.collection('scheduled_sessions').updateOne(
+    { sessionId: session.sessionId },
+    {
+      $set: {
+        emailSent: true,
+        emailSentAt: sentAt,
+        emailMessageId: result.messageId || null,
+        updatedAt: sentAt
+      },
+      ...(reminderMinutes !== null ? {
+        $push: {
+          reminders: {
+            sentAt,
+            minutesUntilStart: reminderMinutes,
+            messageId: result.messageId || null
+          }
         }
-
-        console.log(`📧 Processing candidate session email request for candidate: ${candidateId}`);
-
-        // Get database connection
-        let db;
-        try {
-            db = await getDatabase();
-            console.log('✅ Database connection successful');
-        } catch (dbError) {
-            console.error('❌ Database connection failed:', dbError);
-            return res.status(500).json({
-                success: false,
-                message: 'Database connection failed',
-                error: dbError.message
-            });
-        }
-
-        // Find candidate details - try multiple collections since recruiter uses different schema
-        let candidate = null;
-        
-        // Try shortlistedcandidates collection first (recruiter system)
-        try {
-            const { ObjectId } = await import('mongodb');
-            candidate = await db.collection('shortlistedcandidates').findOne({
-                _id: new ObjectId(candidateId)
-            });
-            
-            if (candidate) {
-                console.log('✅ Found candidate in shortlistedcandidates collection');
-                // Map recruiter schema to email schema
-                candidate = {
-                    candidateId: candidateId,
-                    name: candidate.candidateName,
-                    email: candidate.candidateEmail,
-                    full_name: candidate.candidateName,
-                    candidateEmail: candidate.candidateEmail,
-                    phoneNumber: candidate.phoneNumber,
-                    role: candidate.role,
-                    companyName: candidate.companyName
-                };
-            }
-        } catch (error) {
-            console.log('⚠️ Error checking shortlistedcandidates:', error.message);
-        }
-        
-        // Fallback to candidates collection (interview system)
-        if (!candidate) {
-            try {
-                candidate = await db.collection('candidates').findOne({
-                    candidateId: candidateId
-                });
-                if (candidate) {
-                    console.log('✅ Found candidate in candidates collection');
-                }
-            } catch (error) {
-                console.log('⚠️ Error checking candidates:', error.message);
-            }
-        }
-
-        if (!candidate) {
-            console.log(`❌ Candidate ${candidateId} not found in any collection`);
-            return res.status(404).json({
-                success: false,
-                message: 'Candidate not found in database'
-            });
-        }
-
-        // Find active scheduled session for this candidate
-        const scheduledSession = await db.collection('scheduled_sessions').findOne({
-            candidateId: candidateId,
-            endTime: { $gte: new Date() } // Only active sessions
-        });
-
-        let sessionUrl;
-        let sessionDetails = null;
-
-        if (scheduledSession) {
-            // Use existing session - prioritize production URL
-            const baseUrl = process.env.PRODUCTION_FRONTEND_URL || process.env.FRONTEND_URL || 'http://localhost:5173';
-            sessionUrl = `${baseUrl}?candidateId=${candidateId}&sessionId=${scheduledSession.sessionId}`;
-            sessionDetails = {
-                startTime: scheduledSession.startTime,
-                endTime: scheduledSession.endTime,
-                duration: scheduledSession.duration || 60,
-                sessionId: scheduledSession.sessionId
-            };
-        } else {
-            // Create direct access URL without session timing restrictions - prioritize production URL
-            const baseUrl = process.env.PRODUCTION_FRONTEND_URL || process.env.FRONTEND_URL || 'http://localhost:5173';
-            sessionUrl = `${baseUrl}?candidateId=${candidateId}`;
-            sessionDetails = {
-                startTime: new Date(),
-                endTime: new Date(Date.now() + 2 * 60 * 60 * 1000), // 2 hours from now
-                duration: 120,
-                sessionId: 'direct-access'
-            };
-        }
-
-        // Prepare candidate data for email
-        const candidateData = {
-            name: candidate.name || candidate.full_name || 'Dear Candidate',
-            email: candidate.email || candidate.candidateEmail,
-            candidateId: candidateId
-        };
-
-        // Validate candidate has email
-        if (!candidateData.email) {
-            return res.status(400).json({
-                success: false,
-                message: 'Candidate email not found'
-            });
-        }
-
-        console.log(`📤 Sending session URL to candidate: ${candidateData.email}`);
-        console.log(`🔗 Session URL: ${sessionUrl}`);
-
-        // Send email using emailService
-        const emailResult = await emailService.sendSessionInvite(
-            candidateData,
-            sessionUrl,
-            sessionDetails
-        );
-
-        if (emailResult.success) {
-            // Save email log to database
-            await db.collection('email_logs').insertOne({
-                type: 'candidate_session_invite',
-                candidateId: candidateId,
-                candidateEmail: candidateData.email,
-                candidateName: candidateData.name,
-                sessionUrl: sessionUrl,
-                recruiterEmail: recruiterEmail || 'system',
-                customMessage: message || '',
-                emailSent: true,
-                emailSentAt: new Date(),
-                emailMessageId: emailResult.messageId,
-                sessionDetails: sessionDetails,
-                createdAt: new Date()
-            });
-
-            console.log(`✅ Email sent successfully to ${candidateData.email}`);
-
-            res.json({
-                success: true,
-                message: 'Session URL sent successfully to candidate',
-                data: {
-                    candidateId: candidateId,
-                    candidateName: candidateData.name,
-                    candidateEmail: candidateData.email,
-                    sessionUrl: sessionUrl,
-                    emailMessageId: emailResult.messageId,
-                    sessionDetails: sessionDetails
-                }
-            });
-        } else {
-            console.error(`❌ Failed to send email to ${candidateData.email}:`, emailResult.error);
-
-            // Save failed attempt to database
-            await db.collection('email_logs').insertOne({
-                type: 'candidate_session_invite',
-                candidateId: candidateId,
-                candidateEmail: candidateData.email,
-                candidateName: candidateData.name,
-                sessionUrl: sessionUrl,
-                recruiterEmail: recruiterEmail || 'system',
-                customMessage: message || '',
-                emailSent: false,
-                emailError: emailResult.error,
-                attemptedAt: new Date(),
-                sessionDetails: sessionDetails,
-                createdAt: new Date()
-            });
-
-            res.status(500).json({
-                success: false,
-                message: 'Failed to send session URL to candidate',
-                error: emailResult.error,
-                data: {
-                    candidateId: candidateId,
-                    candidateEmail: candidateData.email
-                }
-            });
-        }
-
-    } catch (error) {
-        console.error('❌ Error in send-candidate-session:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Internal server error',
-            error: error.message
-        });
+      } : {})
     }
-});
+  );
 
-/**
- * Get email logs for a candidate
- * GET /api/email/logs/:candidateId
- */
-router.get('/logs/:candidateId', async (req, res) => {
-    try {
-        const { candidateId } = req.params;
+  await db.collection('email_logs').insertOne({
+    type: reminderMinutes === null ? 'candidate_session_invite' : 'candidate_session_reminder',
+    candidateId: String(candidateId),
+    candidateEmail: email,
+    candidateName: candidateData.name,
+    sessionId: session.sessionId,
+    emailSent: true,
+    emailSentAt: sentAt,
+    emailMessageId: result.messageId || null,
+    // Deliberately do not persist the token-bearing URL.
+    createdAt: sentAt
+  });
 
-        const db = await getDatabase();
-        const logs = await db.collection('email_logs').find({
-            candidateId: candidateId
-        }).sort({ createdAt: -1 }).toArray();
+  return {
+    candidateId: String(candidateId),
+    candidateName: candidateData.name,
+    candidateEmail: email,
+    sessionId: session.sessionId,
+    sessionUrl: secureUrl,
+    emailMessageId: result.messageId || null,
+    sessionDetails
+  };
+}
 
-        res.json({
-            success: true,
-            data: {
-                candidateId: candidateId,
-                totalEmails: logs.length,
-                emails: logs.map(log => ({
-                    id: log._id,
-                    type: log.type,
-                    emailSent: log.emailSent,
-                    sentAt: log.emailSentAt || log.attemptedAt,
-                    recipientEmail: log.candidateEmail,
-                    recruiterEmail: log.recruiterEmail,
-                    sessionUrl: log.sessionUrl,
-                    customMessage: log.customMessage,
-                    error: log.emailError || null
-                }))
-            }
-        });
-
-    } catch (error) {
-        console.error('❌ Error getting email logs:', error);
-        res.status(500).json({
-            success: false,
-            message: 'Internal server error',
-            error: error.message
-        });
+router.post('/send-session-invite', requireAdmin, async (req, res) => {
+  try {
+    const { candidateId, sessionId } = req.body || {};
+    if (!candidateId || !sessionId) {
+      return res.status(400).json({ success: false, message: 'candidateId and sessionId are required' });
     }
+    const data = await sendInvite({ candidateId, sessionId });
+    return res.json({ success: true, message: 'Session invite email sent successfully', data });
+  } catch (error) {
+    console.error('Send session invite failed:', error);
+    return res.status(error.status || 500).json({ success: false, message: error.message });
+  }
 });
+
+router.post('/send-reminder', requireAdmin, async (req, res) => {
+  try {
+    const { candidateId, sessionId, minutesUntilStart = 15 } = req.body || {};
+    if (!candidateId || !sessionId) {
+      return res.status(400).json({ success: false, message: 'candidateId and sessionId are required' });
+    }
+    const data = await sendInvite({
+      candidateId,
+      sessionId,
+      reminderMinutes: Math.min(10080, Math.max(1, Number(minutesUntilStart) || 15))
+    });
+    return res.json({ success: true, message: 'Reminder email sent successfully', data });
+  } catch (error) {
+    console.error('Send reminder failed:', error);
+    return res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+});
+
+router.post('/send-bulk-invites', requireAdmin, async (req, res) => {
+  try {
+    const sessions = req.body?.sessions;
+    if (!Array.isArray(sessions) || sessions.length === 0) {
+      return res.status(400).json({ success: false, message: 'sessions must be a non-empty array' });
+    }
+    if (sessions.length > 50) {
+      return res.status(400).json({ success: false, message: 'A maximum of 50 invites can be sent per request' });
+    }
+
+    const successful = [];
+    const failed = [];
+    for (const item of sessions) {
+      try {
+        successful.push(await sendInvite({ candidateId: item.candidateId, sessionId: item.sessionId }));
+      } catch (error) {
+        failed.push({ candidateId: item.candidateId, sessionId: item.sessionId, error: error.message });
+      }
+    }
+
+    return res.json({
+      success: failed.length === 0,
+      message: `Processed ${sessions.length} invite(s)`,
+      results: { successful, failed }
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to process bulk invites' });
+  }
+});
+
+router.post('/send-candidate-session', requireAdmin, async (req, res) => {
+  try {
+    const { candidateId } = req.body || {};
+    if (!candidateId) return res.status(400).json({ success: false, message: 'candidateId is required' });
+
+    const session = await getScheduledSessionByCandidate(candidateId);
+    if (!session) {
+      return res.status(404).json({
+        success: false,
+        message: 'No scheduled interview exists for this candidate. Create a session before sending an invite.'
+      });
+    }
+
+    const data = await sendInvite({ candidateId, sessionId: session.sessionId });
+    return res.json({ success: true, message: 'Secure session link sent successfully', data });
+  } catch (error) {
+    console.error('Send candidate session failed:', error);
+    return res.status(error.status || 500).json({ success: false, message: error.message });
+  }
+});
+
+router.get('/status/:sessionId', requireAdmin, async (req, res) => {
+  try {
+    const session = await getScheduledSessionById(req.params.sessionId);
+    if (!session) return res.status(404).json({ success: false, message: 'Session not found' });
+    return res.json({
+      success: true,
+      data: {
+        sessionId: session.sessionId,
+        emailSent: session.emailSent || false,
+        emailSentAt: session.emailSentAt || null,
+        emailMessageId: session.emailMessageId || null,
+        reminders: session.reminders || []
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to get email status' });
+  }
+});
+
+router.get('/logs/:candidateId', requireAdmin, async (req, res) => {
+  try {
+    const db = await getDatabase();
+    const logs = await db.collection('email_logs')
+      .find({ candidateId: String(req.params.candidateId) })
+      .sort({ createdAt: -1 })
+      .limit(200)
+      .toArray();
+
+    return res.json({
+      success: true,
+      data: {
+        candidateId: String(req.params.candidateId),
+        totalEmails: logs.length,
+        emails: logs.map(log => ({
+          id: log._id,
+          type: log.type,
+          emailSent: log.emailSent,
+          sentAt: log.emailSentAt,
+          recipientEmail: log.candidateEmail,
+          sessionId: log.sessionId,
+          error: log.emailError || null
+        }))
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to get email logs' });
+  }
+});
+
+router.get('/test', requireAdmin, (req, res) => {
+  return res.json({ success: true, message: 'Email routes are available' });
+});
+
+router.get('/test-config', requireAdmin, async (req, res) => {
+  const result = await emailService.testEmailConfiguration();
+  return res.status(result.success ? 200 : 503).json(result);
+});
+
+export async function closeEmailDatabase() {
+  if (emailMongoClient) {
+    await emailMongoClient.close();
+    emailMongoClient = null;
+    emailDb = null;
+  }
+}
 
 export default router;

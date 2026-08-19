@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: ai-interviewer-backend
+    runtime: node
+    rootDir: backend
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGO_URI
+        sync: false
+      - key: MONGO_DB_NAME
+        value: ai_interviewer
+      - key: MONGO_MAX_POOL_SIZE
+        value: "20"
+      - key: ADMIN_API_KEY
+        sync: false
+      - key: AUTH_SESSION_HOURS
+        value: "12"
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_INTERVIEW_MODEL
+        value: gpt-4.1-mini
+      - key: OPENAI_TIMEOUT_MS
+        value: "45000"
+      - key: OPENAI_MAX_RETRIES
+        value: "2"
+      - key: RESEND_API_KEY
+        sync: false
+      - key: FROM_EMAIL
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: PRODUCTION_FRONTEND_URL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: ENABLE_DEMO_MODE
+        value: "false"

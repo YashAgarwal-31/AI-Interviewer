@@ -1,1042 +1,973 @@
-import crypto from 'crypto';
 import express from 'express';
 import { ObjectId } from 'mongodb';
 import InterviewSession from '../models/InterviewSession.js';
+import {
+  generateAccessToken,
+  hashAccessToken,
+  isDemoEnabled,
+  requireAdmin,
+  verifyAccessToken
+} from '../utils/security.js';
+import {
+  completeSession as completeScheduledSession,
+  getScheduledSessionByCandidate,
+  getScheduledSessionById,
+  incrementAccessAttempts as incrementScheduledAccessAttempts,
+  patchScheduledSession,
+  resetAccessAttempts as resetScheduledAccessAttempts,
+  startSession as startScheduledSession,
+  updateSessionStatus,
+  validateSessionTiming,
+  verifyScheduledAccessToken
+} from '../utils/sessionScheduler.js';
 
 const router = express.Router();
 
-// Initialize OpenAI (will be available from the main server context)
-let openai;
-let candidatesCollection;
-let codeQuestionsCollection;
+let openai = null;
+let candidatesCollection = null;
+let codeQuestionsCollection = null;
+let interviewResultsCollection = null;
+const demoSessions = new Map();
 
-// Initialize collections and OpenAI from main server
-export function initializeSessionRoutes(collections, openaiInstance) {
-  candidatesCollection = collections.candidatesCollection;
-  codeQuestionsCollection = collections.codeQuestionsCollection;
+export function initializeSessionRoutes(collections = {}, openaiInstance = null) {
+  candidatesCollection = collections.candidatesCollection || null;
+  codeQuestionsCollection = collections.codeQuestionsCollection || null;
+  interviewResultsCollection = collections.interviewResultsCollection || null;
   openai = openaiInstance;
 }
 
-// Helper function to generate secure access token
-const generateAccessToken = () => {
-  return crypto.randomBytes(32).toString('hex');
+const frontendBaseUrl = () => (
+  process.env.PRODUCTION_FRONTEND_URL || process.env.FRONTEND_URL || 'http://localhost:5173'
+).replace(/\/$/, '');
+
+const buildAccessUrl = ({ candidateId, sessionId, accessToken }) => {
+  const params = new URLSearchParams({
+    candidateId: String(candidateId),
+    sessionId: String(sessionId),
+    accessToken: String(accessToken)
+  });
+  return `${frontendBaseUrl()}/?${params.toString()}`;
 };
 
-// Helper function to load candidate profile from database
+function defaultQuestions() {
+  return [
+    'Tell me about a project you are most proud of and the most important technical decision you made.',
+    'Describe how you debug a production issue when the root cause is not obvious.',
+    'Explain the time and space complexity of a recent algorithm you implemented.',
+    'How would you design a REST API for a task management application?',
+    'When would you choose SQL over NoSQL, and why?',
+    'Explain how asynchronous code executes in JavaScript.'
+  ];
+}
+
+function defaultCodingTasks() {
+  return [{
+    id: 'sum-array',
+    title: 'Sum of Array',
+    description: 'Write a function `sumArray(arr)` that returns the sum of numeric elements in an array.',
+    languageHints: ['javascript', 'python'],
+    exampleInputOutput: { input: '[1,2,3]', output: '6' },
+    tests: ['sumArray([1,2,3]) === 6', 'sumArray([-1,1]) === 0']
+  }];
+}
+
 async function loadCandidateProfile(candidateId) {
-  if (!candidatesCollection) {
-    console.warn('candidatesCollection not available for profile loading');
-    return null;
-  }
-
+  if (!candidatesCollection || !candidateId) return null;
   try {
-    const doc = await candidatesCollection.findOne({ candidateId: candidateId.toString() });
-    if (doc) {
-      const { _id, ...rest } = doc;
-      return rest;
+    const candidateIdString = String(candidateId);
+    let doc = await candidatesCollection.findOne({ candidateId: candidateIdString });
+    if (!doc && ObjectId.isValid(candidateIdString)) {
+      doc = await candidatesCollection.findOne({ _id: new ObjectId(candidateIdString) });
     }
-  } catch (err) {
-    console.error('Error loading candidate profile:', err);
-  }
-  return null;
-}
-
-// Helper function to generate interview questions for a candidate
-async function generateQuestionsForCandidate(profile) {
-  if (!openai) return getDefaultQuestions();
-
-  try {
-    const prompt = `You are an expert technical interviewer. Based on the following candidate profile, generate an array (JSON) of 6-10 relevant interview questions that focus on the candidate's skills, projects, and likely junior-to-mid level expectations. Return ONLY a JSON array of strings.
-
-Candidate Profile:
-Name: ${profile.candidateName}
-Position: ${profile.position || 'Full Stack Developer'}
-Skills: ${Array.isArray(profile.skills) ? profile.skills.join(', ') : profile.skills}
-Projects: ${profile.projectDetails || profile.githubProjects || 'N/A'}
-Experience: ${profile.experience || 'N/A'}
-
-Requirements:
-- Produce 6 to 10 clear, distinct interview questions
-- Include at least 1 coding or implementation task-style question
-- Include at least 1 question about system design or architecture appropriate to the role
-- Keep questions concise and practical`;
-
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4.1-mini',
-      messages: [
-        { role: 'system', content: 'You are an expert technical interviewer and question writer.' },
-        { role: 'user', content: prompt }
-      ],
-      temperature: 0.5,
-      max_tokens: 800
-    });
-
-    let content = completion.choices[0].message.content.trim();
-    content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-
-    try {
-      const questions = JSON.parse(content);
-      if (Array.isArray(questions)) return questions;
-    } catch (err) {
-      console.warn('Failed to parse AI-generated questions, using fallback');
-    }
-
-    return getDefaultQuestions();
+    if (!doc) return null;
+    const { _id, ...profile } = doc;
+    return profile;
   } catch (error) {
-    console.error('Error generating questions:', error);
-    return getDefaultQuestions();
-  }
-}
-
-// Helper function to generate coding tasks for a candidate
-async function generateCodingTasksForCandidate(profile) {
-  if (!openai) return getDefaultCodingTasks();
-
-  try {
-    const prompt = `You are an expert coding-question writer. Given the following candidate profile, produce a JSON array of 1-3 coding tasks suitable for a live coding editor. Each task should be an object with the fields: id (short string), title, description, languageHints (array), exampleInputOutput (optional), and a small set of unit tests described as strings. Return ONLY valid JSON.
-
-Candidate Profile:
-Name: ${profile.candidateName}
-Position: ${profile.position || 'Full Stack Developer'}
-Skills: ${Array.isArray(profile.skills) ? profile.skills.join(', ') : profile.skills}
-Projects: ${profile.projectDetails || profile.githubProjects || 'N/A'}
-Experience: ${profile.experience || 'N/A'}
-
-Requirements:
-- Create 1 to 3 practical coding tasks, each with clear instructions and input/output examples when appropriate.
-- Include at least one task that can be evaluated with small unit tests.
-- Keep tasks concise and focused for a 20-45 minute coding exercise.
-- Return only JSON (array of objects).`;
-
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4.1-mini',
-      messages: [
-        { role: 'system', content: 'You are a senior engineer who writes clear, testable coding tasks.' },
-        { role: 'user', content: prompt }
-      ],
-      temperature: 0.6,
-      max_tokens: 1200
-    });
-
-    let content = completion.choices[0].message.content.trim();
-    content = content.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-
-    try {
-      const tasks = JSON.parse(content);
-      if (Array.isArray(tasks) && tasks.length > 0) return tasks;
-    } catch (err) {
-      console.warn('Failed to parse AI-generated coding tasks, using fallback');
-    }
-
-    return getDefaultCodingTasks();
-  } catch (error) {
-    console.error('Error generating coding tasks:', error);
-    return getDefaultCodingTasks();
-  }
-}
-
-// Helper function to load existing coding questions from database
-async function loadCodingQuestions(candidateId) {
-  if (!codeQuestionsCollection) return null;
-
-  try {
-    const doc = await codeQuestionsCollection.findOne({ candidateId: candidateId.toString() });
-    if (doc && doc.tasks) {
-      return doc.tasks;
-    }
-  } catch (err) {
-    console.error('Error loading coding questions:', err);
-  }
-  return null;
-}
-
-// Convert codingAssessment from profile to tasks format
-function convertCodingAssessmentToTasks(profile) {
-  try {
-    if (!profile || !profile.codingAssessment || !Array.isArray(profile.codingAssessment.questions)) return null;
-    
-    const qa = profile.codingAssessment.questions;
-    const tasks = qa.map(q => {
-      const sample = Array.isArray(q.sampleTests) && q.sampleTests.length > 0 ? q.sampleTests[0] : null;
-      const exampleInputOutput = sample ? { input: sample.input, output: sample.expected } : null;
-      const tests = [];
-      
-      if (Array.isArray(q.sampleTests)) {
-        q.sampleTests.forEach((t, i) => tests.push(`${q.id || i}-sample: input=${JSON.stringify(t.input)} expected=${JSON.stringify(t.expected)}`));
-      }
-      if (Array.isArray(q.hiddenTests)) {
-        q.hiddenTests.forEach((t, i) => tests.push(`${q.id || 'hidden'}-hidden: input=${JSON.stringify(t.input)} expected=${JSON.stringify(t.expected)}`));
-      }
-
-      return {
-        id: q.id || (q.title || '').toLowerCase().replace(/\s+/g, '_'),
-        title: q.title || q.id || 'Coding Task',
-        description: (q.prompt ? q.prompt + '\n\n' : '') + (q.signature || ''),
-        languageHints: q.language ? [q.language] : (q.languageHints || []),
-        exampleInputOutput,
-        tests
-      };
-    });
-    return tasks;
-  } catch (err) {
-    console.warn('Failed to convert codingAssessment to tasks:', err.message);
+    console.warn('Unable to load candidate profile:', error.message);
     return null;
   }
 }
 
-// Fallback questions and tasks
-function getDefaultQuestions() {
-  return [
-    'Tell me about a project you built that you are most proud of and what you learned from it.',
-    'Explain your typical approach to debugging a production issue.',
-    'Write a function to reverse a string and explain its time complexity.',
-    'How would you design a simple REST API for a todo app? Describe endpoints and data models.',
-    'What are the differences between SQL and NoSQL databases and when to use each?',
-    'Explain the event loop in JavaScript and how asynchronous code executes.'
-  ];
-}
-
-function getDefaultCodingTasks() {
-  return [
-    {
-      id: 'sum-array',
-      title: 'Sum of Array',
-      description: 'Write a function `sumArray(arr)` that returns the sum of numeric elements in the array.',
-      languageHints: ['javascript', 'python'],
-      exampleInputOutput: { input: '[1,2,3]', output: '6' },
-      tests: ['sumArray([1,2,3]) === 6', 'sumArray([-1,1]) === 0']
-    }
-  ];
-}
-
-// Comprehensive interview data preparation
-async function prepareInterviewData(candidateId, sessionData) {
-  console.log(`📋 Preparing interview data for candidate: ${candidateId}`);
-  
-  const interviewData = {
-    candidateProfile: null,
-    interviewQuestions: [],
-    codingTasks: [],
-    systemPrompt: '',
-    metadata: {
-      preparationTime: new Date().toISOString(),
-      dataSource: 'fallback'
-    }
-  };
+async function generateQuestions(profile) {
+  if (Array.isArray(profile?.customQuestions) && profile.customQuestions.length) {
+    return profile.customQuestions.slice(0, 12);
+  }
+  if (!openai) return defaultQuestions();
 
   try {
-    // 1. Load candidate profile from database
-    const profile = await loadCandidateProfile(candidateId);
-    
-    if (profile) {
-      interviewData.candidateProfile = profile;
-      interviewData.metadata.dataSource = 'database';
-      console.log(`✅ Loaded candidate profile for: ${profile.candidateName}`);
-
-      // 2. Generate or load interview questions
-      if (Array.isArray(profile.customQuestions) && profile.customQuestions.length > 0) {
-        interviewData.interviewQuestions = profile.customQuestions;
-        console.log(`✅ Using custom questions (${profile.customQuestions.length})`);
-      } else {
-        interviewData.interviewQuestions = await generateQuestionsForCandidate(profile);
-        console.log(`✅ Generated AI questions (${interviewData.interviewQuestions.length})`);
-      }
-
-      // 3. Load or generate coding tasks
-      let codingTasks = await loadCodingQuestions(candidateId);
-      
-      if (!codingTasks) {
-        // Try to convert existing codingAssessment
-        codingTasks = convertCodingAssessmentToTasks(profile);
-      }
-      
-      if (!codingTasks) {
-        // Generate new coding tasks
-        codingTasks = await generateCodingTasksForCandidate(profile);
-        
-        // Save generated tasks to database
-        if (codeQuestionsCollection && codingTasks) {
-          try {
-            await codeQuestionsCollection.updateOne(
-              { candidateId: candidateId.toString() },
-              { $set: { candidateId: candidateId.toString(), tasks: codingTasks, updatedAt: new Date().toISOString() } },
-              { upsert: true }
-            );
-            console.log(`✅ Saved generated coding tasks to database`);
-          } catch (err) {
-            console.warn('Failed to save coding tasks:', err);
-          }
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_INTERVIEW_MODEL || 'gpt-4.1-mini',
+      messages: [
+        {
+          role: 'system',
+          content: 'You write concise, practical technical interview questions. Return only a JSON array of strings.'
+        },
+        {
+          role: 'user',
+          content: `Create 6-10 interview questions for this candidate. Include project depth, fundamentals, one architecture question, and one coding-oriented question.\n\nName: ${profile?.candidateName || 'Candidate'}\nRole: ${profile?.position || profile?.role || 'Software Developer'}\nSkills: ${Array.isArray(profile?.skills) ? profile.skills.join(', ') : (profile?.skills || 'Not provided')}\nExperience: ${profile?.experience || 'Not provided'}\nProjects: ${profile?.projectDetails || profile?.githubProjects || 'Not provided'}`
         }
-      }
-      
-      interviewData.codingTasks = codingTasks || getDefaultCodingTasks();
-      console.log(`✅ Prepared coding tasks (${interviewData.codingTasks.length})`);
+      ],
+      temperature: 0.4,
+      max_tokens: 900
+    });
 
-      // 4. Generate system prompt for the AI interviewer
-      interviewData.systemPrompt = generateSystemPrompt(profile, sessionData, interviewData.interviewQuestions, interviewData.codingTasks);
-      
-    } else {
-      // Fallback to session data if no profile found
-      console.log(`⚠️ No profile found, using session data for: ${sessionData.candidateDetails.candidateName}`);
-      
-      const fallbackProfile = {
-        candidateName: sessionData.candidateDetails.candidateName,
-        position: sessionData.candidateDetails.role,
-        skills: sessionData.candidateDetails.techStack || [],
-        experience: sessionData.candidateDetails.experience
-      };
-      
-      interviewData.candidateProfile = fallbackProfile;
-      interviewData.interviewQuestions = await generateQuestionsForCandidate(fallbackProfile);
-      interviewData.codingTasks = await generateCodingTasksForCandidate(fallbackProfile);
-      interviewData.systemPrompt = generateSystemPrompt(fallbackProfile, sessionData, interviewData.interviewQuestions, interviewData.codingTasks);
+    const raw = completion.choices?.[0]?.message?.content?.trim() || '';
+    const cleaned = raw.replace(/```json\n?/gi, '').replace(/```/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+    if (Array.isArray(parsed) && parsed.length) {
+      return parsed.filter(item => typeof item === 'string' && item.trim()).slice(0, 12);
     }
-
   } catch (error) {
-    console.error('Error preparing interview data:', error);
-    
-    // Ultimate fallback
-    interviewData.candidateProfile = sessionData.candidateDetails;
-    interviewData.interviewQuestions = getDefaultQuestions();
-    interviewData.codingTasks = getDefaultCodingTasks();
-    interviewData.systemPrompt = generateSystemPrompt(sessionData.candidateDetails, sessionData, interviewData.interviewQuestions, interviewData.codingTasks);
-    interviewData.metadata.dataSource = 'fallback_error';
+    console.warn('AI question generation failed, using defaults:', error.message);
   }
-
-  console.log(`🎯 Interview data prepared: ${interviewData.interviewQuestions.length} questions, ${interviewData.codingTasks.length} coding tasks`);
-  return interviewData;
+  return defaultQuestions();
 }
 
-// Generate system prompt for the AI interviewer
-function generateSystemPrompt(profile, sessionData, questions, codingTasks = []) {
-  const candidateName = profile.candidateName || sessionData.candidateDetails.candidateName;
-  const position = profile.position || sessionData.candidateDetails.role;
-  const skills = Array.isArray(profile.skills) ? profile.skills.join(', ') : (profile.skills || sessionData.candidateDetails.techStack?.join(', ') || '');
-  const projectDetails = profile.projectDetails || profile.githubProjects || '';
+async function loadOrGenerateCodingTasks(candidateId, profile) {
+  if (codeQuestionsCollection && candidateId) {
+    try {
+      const existing = await codeQuestionsCollection.findOne({ candidateId: String(candidateId) });
+      if (Array.isArray(existing?.tasks) && existing.tasks.length) return existing.tasks;
+    } catch (error) {
+      console.warn('Unable to load stored coding tasks:', error.message);
+    }
+  }
 
-  return `You are an expert technical interviewer conducting an interview for a ${position} position.
+  if (Array.isArray(profile?.codingAssessment?.questions) && profile.codingAssessment.questions.length) {
+    const tasks = profile.codingAssessment.questions.slice(0, 3).map((question, index) => ({
+      id: question.id || `task-${index + 1}`,
+      title: question.title || `Coding Task ${index + 1}`,
+      description: [question.prompt, question.signature].filter(Boolean).join('\n\n'),
+      languageHints: question.language ? [question.language] : (question.languageHints || []),
+      exampleInputOutput: Array.isArray(question.sampleTests) && question.sampleTests[0]
+        ? { input: question.sampleTests[0].input, output: question.sampleTests[0].expected }
+        : null,
+      tests: [
+        ...(question.sampleTests || []).map((test, i) => `sample-${i + 1}: input=${JSON.stringify(test.input)} expected=${JSON.stringify(test.expected)}`),
+        ...(question.hiddenTests || []).map((test, i) => `hidden-${i + 1}: input=${JSON.stringify(test.input)} expected=${JSON.stringify(test.expected)}`)
+      ]
+    }));
+    return tasks;
+  }
 
-Candidate Information:
-- Name: ${candidateName}
-- Skills: ${skills}
-${projectDetails ? `- Project Experience: ${projectDetails}` : ''}
+  let tasks = null;
+  if (openai) {
+    try {
+      const completion = await openai.chat.completions.create({
+        model: process.env.OPENAI_INTERVIEW_MODEL || 'gpt-4.1-mini',
+        messages: [
+          {
+            role: 'system',
+            content: 'Write practical coding interview exercises. Return only valid JSON.'
+          },
+          {
+            role: 'user',
+            content: `Return a JSON array with 1-2 coding tasks. Each object must contain id, title, description, languageHints (array), exampleInputOutput (optional), and tests (array of strings).\n\nRole: ${profile?.position || profile?.role || 'Software Developer'}\nSkills: ${Array.isArray(profile?.skills) ? profile.skills.join(', ') : (profile?.skills || 'Not provided')}\nExperience: ${profile?.experience || 'Not provided'}`
+          }
+        ],
+        temperature: 0.4,
+        max_tokens: 1000
+      });
+      const raw = completion.choices?.[0]?.message?.content?.trim() || '';
+      const parsed = JSON.parse(raw.replace(/```json\n?/gi, '').replace(/```/g, '').trim());
+      if (Array.isArray(parsed) && parsed.length) tasks = parsed.slice(0, 3);
+    } catch (error) {
+      console.warn('AI coding task generation failed, using defaults:', error.message);
+    }
+  }
 
-Your responsibilities:
-1. Ask relevant technical questions based on the candidate's skills and experience
-2. Follow up on their answers with deeper technical questions
-3. Assess their problem-solving approach
-4. Be professional, encouraging, and constructive
-5. Keep questions clear and concise
-6. Adapt difficulty based on their responses
-
-${questions && questions.length > 0 ? `
-Priority Questions to Cover:
-${questions.map((q, i) => `${i + 1}. ${q}`).join('\n')}
-` : ''}
-
-${codingTasks && codingTasks.length > 0 ? `
-Available Coding Tasks (IMPORTANT - Use these EXACT tasks when asking coding questions):
-${codingTasks.map((task, i) => `${i + 1}. ${task.title}: ${task.description}
-   Languages: ${task.languageHints ? task.languageHints.join(', ') : 'Any'}
-   ${task.exampleInputOutput ? `Example: Input ${task.exampleInputOutput.input} -> Output ${task.exampleInputOutput.output}` : ''}`).join('\n')}
-
-CRITICAL CODING INSTRUCTION: When you want to ask a coding question, you MUST use one of the above specific tasks word-for-word. Say something like "I'd like you to work on a coding exercise: ${codingTasks[0]?.title || 'coding task'}. ${codingTasks[0]?.description || 'Please implement the solution.'}" This ensures the code editor will show the exact same question you're asking about.
-` : ''}
-
-Interview Guidelines:
-- Start with an introduction and ask about their background
-- Progress from general to specific technical questions
-- Ask about real-world scenarios and problem-solving
-- Evaluate code quality, best practices, and system design thinking
-- Be conversational but professional
-
-Important Interview Flow for Coding Exercises:
-- When you want to ask a coding question, use the EXACT wording from the "Available Coding Tasks" section above
-- The system will automatically open a coding editor with the matching task when you reference it
-- Once the coding exercise starts, you MUST pause asking further questions and wait for the coding submission
-- Do NOT speculate or continue with follow-ups while the candidate is actively working on the test
-- Once the candidate submits their solution, the system will notify you and include a short summary of the submission
-- At that point, resume the interview: evaluate the submission, ask follow-ups about approach and trade-offs, and continue the normal interview flow
-- Keep your responses concise and focus on evaluating the candidate's reasoning, code correctness, and design choices after the submission
-
-Remember: You're speaking to them via voice, so keep responses natural and concise.`;
+  tasks = tasks || defaultCodingTasks();
+  if (codeQuestionsCollection && candidateId) {
+    try {
+      await codeQuestionsCollection.updateOne(
+        { candidateId: String(candidateId) },
+        { $set: { candidateId: String(candidateId), tasks, updatedAt: new Date().toISOString() } },
+        { upsert: true }
+      );
+    } catch (error) {
+      console.warn('Unable to persist generated coding tasks:', error.message);
+    }
+  }
+  return tasks;
 }
 
-// Helper function to parse date/time strings
-const parseDateTime = (dateStr, timeStr) => {
-  // Handle different date formats
-  const date = new Date(dateStr);
-  if (timeStr) {
-    const [hours, minutes] = timeStr.split(':').map(Number);
-    date.setHours(hours, minutes, 0, 0);
-  }
-  return date;
-};
+function buildSystemPrompt(profile, questions, codingTasks) {
+  const candidateName = profile?.candidateName || 'Candidate';
+  const position = profile?.position || profile?.role || 'Software Developer';
+  const skills = Array.isArray(profile?.skills)
+    ? profile.skills.join(', ')
+    : (Array.isArray(profile?.techStack) ? profile.techStack.join(', ') : (profile?.skills || 'Not provided'));
+  const projectDetails = profile?.projectDetails || profile?.githubProjects || '';
 
-// Create interview session for a candidate
-router.post('/create', async (req, res) => {
+  return `You are conducting a professional technical interview for a ${position} role.\n\nCandidate: ${candidateName}\nSkills: ${skills}${projectDetails ? `\nProjects: ${projectDetails}` : ''}\n\nInterview rules:\n- Ask one clear question at a time.\n- Start with background, then move into technical depth.\n- Ask follow-ups based on the candidate's actual answer.\n- Adapt difficulty gradually.\n- Evaluate reasoning, trade-offs, correctness, and communication.\n- Keep spoken responses concise.\n- Do not reveal hidden tests or expected solutions.\n\nPriority questions:\n${questions.map((question, i) => `${i + 1}. ${question}`).join('\n')}\n\nCoding tasks available to the editor:\n${codingTasks.map((task, i) => `${i + 1}. ${task.title}: ${task.description}`).join('\n')}\n\nWhen starting a coding exercise, name one of the listed coding tasks clearly. Once coding starts, pause normal questioning until a submission arrives. After submission, evaluate the approach and ask a concise follow-up.`;
+}
+
+function sessionProfile(session, type) {
+  if (type === 'scheduled') {
+    return {
+      candidateName: session.candidateName,
+      candidateEmail: session.candidateEmail,
+      companyName: session.companyName,
+      position: session.position,
+      role: session.position,
+      skills: session.interviewConfig?.skills || [],
+      experience: session.interviewConfig?.experienceLevel || ''
+    };
+  }
+  if (type === 'demo') return session.profile;
+  return {
+    candidateName: session.candidateDetails?.candidateName,
+    candidateEmail: session.candidateDetails?.candidateEmail,
+    companyName: session.candidateDetails?.companyName,
+    position: session.candidateDetails?.role,
+    role: session.candidateDetails?.role,
+    skills: session.candidateDetails?.techStack || [],
+    experience: session.candidateDetails?.experience || ''
+  };
+}
+
+async function prepareInterviewData(session, type) {
+  const existing = session.interviewData;
+  if (existing?.systemPrompt && Array.isArray(existing?.interviewQuestions) && existing.interviewQuestions.length) {
+    return existing;
+  }
+
+  const candidateId = type === 'legacy' ? String(session.candidateId) : String(session.candidateId || 'demo');
+  const fallback = sessionProfile(session, type);
+  const storedProfile = type === 'demo' ? null : await loadCandidateProfile(candidateId);
+  const profile = { ...fallback, ...(storedProfile || {}) };
+  const interviewQuestions = await generateQuestions(profile);
+  const codingTasks = type === 'demo'
+    ? defaultCodingTasks()
+    : await loadOrGenerateCodingTasks(candidateId, profile);
+
+  return {
+    candidateProfile: profile,
+    interviewQuestions,
+    codingTasks,
+    systemPrompt: buildSystemPrompt(profile, interviewQuestions, codingTasks),
+    conversationHistory: Array.isArray(existing?.conversationHistory) ? existing.conversationHistory : [],
+    metadata: {
+      ...(existing?.metadata || {}),
+      dataLoadedAt: new Date().toISOString(),
+      dataSource: storedProfile ? 'database' : 'session'
+    },
+    results: existing?.results || undefined
+  };
+}
+
+async function findLegacyBySessionId(sessionId) {
+  return InterviewSession.findOne({ sessionId })
+    .select('+security.accessToken +security.accessTokenHash');
+}
+
+async function findLegacyByCandidate(candidateId) {
+  if (!ObjectId.isValid(String(candidateId))) return null;
+  return InterviewSession.findOne({
+    candidateId: new ObjectId(String(candidateId)),
+    sessionStatus: { $in: ['scheduled', 'active'] }
+  })
+    .sort({ 'sessionConfig.scheduledStartTime': -1 })
+    .select('+security.accessToken +security.accessTokenHash');
+}
+
+async function getSessionById(sessionId) {
+  const demo = demoSessions.get(String(sessionId));
+  if (demo) return { type: 'demo', session: demo };
+
   try {
-    const {
-      candidateId,
-      applicationId,
-      jobId,
-      recruiterId,
-      candidateDetails,
-      scheduledDate,
-      scheduledTime,
-      duration = 60, // default 60 minutes
-      timeZone = 'UTC',
-      accessWindow = { beforeStart: 15, afterEnd: 15 }
-    } = req.body;
+    const scheduled = await getScheduledSessionById(sessionId);
+    if (scheduled) return { type: 'scheduled', session: scheduled };
+  } catch (error) {
+    // Scheduler may be unavailable when MongoDB is not configured in local demo mode.
+  }
 
-    // Validate required fields
-    if (!candidateId || !applicationId || !jobId || !recruiterId) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: candidateId, applicationId, jobId, recruiterId'
-      });
+  const legacy = await findLegacyBySessionId(sessionId);
+  return legacy ? { type: 'legacy', session: legacy } : null;
+}
+
+function verifySessionToken(context, token) {
+  if (!context || !token) return false;
+  if (context.type === 'scheduled') return verifyScheduledAccessToken(context.session, token);
+  return verifyAccessToken(context.session, token);
+}
+
+function legacyTiming(session) {
+  const now = new Date();
+  const start = new Date(session.sessionConfig.scheduledStartTime);
+  const end = new Date(session.sessionConfig.scheduledEndTime);
+  const before = Number(session.sessionConfig.accessWindow?.beforeStart || 0);
+  const after = Number(session.sessionConfig.accessWindow?.afterEnd || 0);
+  const accessStart = new Date(start.getTime() - before * 60000);
+  const accessEnd = new Date(end.getTime() + after * 60000);
+
+  return {
+    isValid: now >= accessStart && now <= accessEnd && ['scheduled', 'active'].includes(session.sessionStatus),
+    tooEarly: now < accessStart,
+    expired: now > accessEnd,
+    accessStart,
+    accessEnd,
+    timeToStart: Math.max(0, Math.ceil((start - now) / 60000)),
+    timeToEnd: Math.max(0, Math.ceil((end - now) / 60000))
+  };
+}
+
+async function persistInterviewData(context, interviewData) {
+  if (context.type === 'scheduled') {
+    await patchScheduledSession(context.session.sessionId, { interviewData });
+    context.session.interviewData = interviewData;
+    return;
+  }
+  if (context.type === 'demo') {
+    context.session.interviewData = interviewData;
+    demoSessions.set(context.session.sessionId, context.session);
+    return;
+  }
+
+  context.session.interviewData = interviewData;
+  context.session.markModified('interviewData');
+  await context.session.save();
+}
+
+function publicSession(context, accessToken, timing = null) {
+  const { type, session } = context;
+  const profile = sessionProfile(session, type);
+
+  if (type === 'scheduled') {
+    return {
+      sessionId: session.sessionId,
+      candidateId: session.candidateId,
+      candidateName: profile.candidateName,
+      companyName: profile.companyName,
+      position: profile.position,
+      role: profile.position,
+      skills: session.interviewConfig?.skills || [],
+      status: session.status,
+      isScheduled: true,
+      startTime: session.startTime,
+      endTime: session.endTime,
+      scheduledStartTime: session.startTime,
+      scheduledEndTime: session.endTime,
+      duration: session.duration,
+      timeRemaining: timing?.timeToEnd ?? null,
+      accessToken
+    };
+  }
+
+  if (type === 'demo') {
+    return {
+      sessionId: session.sessionId,
+      candidateId: session.candidateId,
+      candidateName: profile.candidateName,
+      companyName: profile.companyName,
+      position: profile.position,
+      role: profile.position,
+      skills: profile.skills || [],
+      status: session.status,
+      isScheduled: false,
+      duration: 60,
+      timeRemaining: 60,
+      accessToken
+    };
+  }
+
+  return {
+    sessionId: session.sessionId,
+    candidateId: String(session.candidateId),
+    candidateName: profile.candidateName,
+    companyName: profile.companyName,
+    position: profile.position,
+    role: profile.position,
+    skills: profile.skills || [],
+    status: session.sessionStatus,
+    isScheduled: true,
+    startTime: session.sessionConfig.scheduledStartTime,
+    endTime: session.sessionConfig.scheduledEndTime,
+    scheduledStartTime: session.sessionConfig.scheduledStartTime,
+    scheduledEndTime: session.sessionConfig.scheduledEndTime,
+    duration: session.sessionConfig.duration,
+    timeRemaining: timing?.timeToEnd ?? null,
+    accessToken
+  };
+}
+
+async function activateAndValidate(context) {
+  if (context.type === 'scheduled') {
+    const validation = validateSessionTiming(context.session);
+    if (!validation.isValid) {
+      if (validation.shouldExpire) await updateSessionStatus(context.session.sessionId, 'expired');
+      return { ok: false, validation };
     }
-
-    if (!scheduledDate || !scheduledTime) {
-      return res.status(400).json({
-        success: false,
-        error: 'scheduledDate and scheduledTime are required'
-      });
+    if (context.session.status === 'scheduled') {
+      context.session = await startScheduledSession(context.session.sessionId);
     }
+    await resetScheduledAccessAttempts(context.session.sessionId);
+    return { ok: true, timing: validation };
+  }
 
-    // Check if session already exists for this candidate and job
-    const existingSession = await InterviewSession.findOne({
-      candidateId: new ObjectId(candidateId),
-      jobId: new ObjectId(jobId),
-      sessionStatus: { $in: ['scheduled', 'active'] }
-    });
+  if (context.type === 'demo') return { ok: true, timing: { timeToEnd: 60 } };
 
-    if (existingSession) {
-      return res.status(409).json({
-        success: false,
-        error: 'Active session already exists for this candidate and job',
-        existingSessionId: existingSession.sessionId
-      });
+  const timing = legacyTiming(context.session);
+  if (!timing.isValid) {
+    if (timing.expired && !['completed', 'cancelled', 'expired'].includes(context.session.sessionStatus)) {
+      context.session.sessionStatus = 'expired';
+      context.session.accessControl.isActive = false;
+      await context.session.save();
     }
+    return { ok: false, validation: { ...timing, reason: timing.tooEarly ? 'Interview session is not accessible yet' : 'Interview session has expired' } };
+  }
+  if (context.session.sessionStatus === 'scheduled') await context.session.activateSession();
+  context.session.security.loginAttempts = 0;
+  await context.session.save();
+  return { ok: true, timing };
+}
 
-    // Parse scheduled date and time
-    const scheduledStartTime = parseDateTime(scheduledDate, scheduledTime);
-    const scheduledEndTime = new Date(scheduledStartTime.getTime() + (duration * 60000));
+async function authorizedContextById(sessionId, accessToken) {
+  const context = await getSessionById(sessionId);
+  if (!context) return { error: { status: 404, message: 'Session not found' } };
+  if (!verifySessionToken(context, accessToken)) {
+    if (context.type === 'scheduled') {
+      await incrementScheduledAccessAttempts(context.session.sessionId);
+    } else if (context.type === 'legacy') {
+      context.session.security.loginAttempts = (context.session.security.loginAttempts || 0) + 1;
+      context.session.security.lastLoginAttempt = new Date();
+      await context.session.save();
+    }
+    return { error: { status: 401, message: 'Invalid interview access token' } };
+  }
+  return { context };
+}
 
-    // Generate unique session ID and access token
-    const sessionId = `interview_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
-    const accessToken = generateAccessToken();
+async function createLegacySession(payload) {
+  const {
+    candidateId,
+    applicationId,
+    jobId,
+    recruiterId,
+    candidateDetails = {},
+    scheduledDate,
+    scheduledTime,
+    duration = 60,
+    timeZone = 'UTC',
+    accessWindow = { beforeStart: 15, afterEnd: 15 }
+  } = payload;
 
-    // Create session
-    const session = new InterviewSession({
-      sessionId,
-      candidateId: new ObjectId(candidateId),
-      applicationId: new ObjectId(applicationId),
-      jobId: new ObjectId(jobId),
-      recruiterId: new ObjectId(recruiterId),
-      candidateDetails: {
-        candidateName: candidateDetails.candidateName || candidateDetails.name,
-        candidateEmail: candidateDetails.candidateEmail || candidateDetails.email,
-        phoneNumber: candidateDetails.phoneNumber || candidateDetails.phone,
-        companyName: candidateDetails.companyName,
-        role: candidateDetails.role,
-        techStack: candidateDetails.techStack || [],
-        experience: candidateDetails.experience
-      },
-      sessionConfig: {
-        scheduledStartTime,
-        scheduledEndTime,
-        timeZone,
-        duration,
-        accessWindow
-      },
-      security: {
-        accessToken,
-        maxLoginAttempts: 3,
-        loginAttempts: 0
-      },
-      sessionStatus: 'scheduled'
-    });
+  const objectIds = { candidateId, applicationId, jobId, recruiterId };
+  for (const [name, value] of Object.entries(objectIds)) {
+    if (!ObjectId.isValid(String(value))) throw new Error(`${name} must be a valid MongoDB ObjectId`);
+  }
+  if (!candidateDetails.candidateName && !candidateDetails.name) throw new Error('candidate name is required');
+  if (!candidateDetails.candidateEmail && !candidateDetails.email) throw new Error('candidate email is required');
+  if (!scheduledDate || !scheduledTime) throw new Error('scheduledDate and scheduledTime are required');
 
-    await session.save();
+  const scheduledStartTime = new Date(`${scheduledDate}T${scheduledTime}`);
+  if (Number.isNaN(scheduledStartTime.getTime())) throw new Error('Invalid scheduled date/time');
+  const durationMinutes = Math.max(1, Number(duration) || 60);
+  const scheduledEndTime = new Date(scheduledStartTime.getTime() + durationMinutes * 60000);
 
-    res.json({
+  const existing = await InterviewSession.findOne({
+    candidateId: new ObjectId(String(candidateId)),
+    jobId: new ObjectId(String(jobId)),
+    sessionStatus: { $in: ['scheduled', 'active'] }
+  });
+  if (existing) {
+    const conflict = new Error('Active session already exists for this candidate and job');
+    conflict.status = 409;
+    conflict.existingSessionId = existing.sessionId;
+    throw conflict;
+  }
+
+  const accessToken = generateAccessToken();
+  const session = new InterviewSession({
+    sessionId: `interview_${cryptoRandomId()}`,
+    candidateId: new ObjectId(String(candidateId)),
+    applicationId: new ObjectId(String(applicationId)),
+    jobId: new ObjectId(String(jobId)),
+    recruiterId: new ObjectId(String(recruiterId)),
+    candidateDetails: {
+      candidateName: candidateDetails.candidateName || candidateDetails.name,
+      candidateEmail: candidateDetails.candidateEmail || candidateDetails.email,
+      phoneNumber: candidateDetails.phoneNumber || candidateDetails.phone,
+      companyName: candidateDetails.companyName || '',
+      role: candidateDetails.role || 'Software Developer',
+      techStack: Array.isArray(candidateDetails.techStack) ? candidateDetails.techStack : [],
+      experience: candidateDetails.experience || ''
+    },
+    sessionConfig: {
+      scheduledStartTime,
+      scheduledEndTime,
+      timeZone,
+      duration: durationMinutes,
+      accessWindow
+    },
+    security: {
+      accessTokenHash: hashAccessToken(accessToken),
+      loginAttempts: 0,
+      maxLoginAttempts: 5
+    },
+    sessionStatus: 'scheduled'
+  });
+  await session.save();
+
+  return { session, accessToken };
+}
+
+function cryptoRandomId() {
+  return `${Date.now()}_${generateAccessToken().slice(0, 16)}`;
+}
+
+router.post('/create', requireAdmin, async (req, res) => {
+  try {
+    const { session, accessToken } = await createLegacySession(req.body || {});
+    return res.status(201).json({
       success: true,
       message: 'Interview session created successfully',
       sessionId: session.sessionId,
-      accessToken: session.security.accessToken,
+      accessToken,
       sessionDetails: {
         scheduledStartTime: session.sessionConfig.scheduledStartTime,
         scheduledEndTime: session.sessionConfig.scheduledEndTime,
         duration: session.sessionConfig.duration,
         accessWindow: session.sessionConfig.accessWindow
       },
-      accessUrl: `/interview/session/${session.sessionId}?token=${session.security.accessToken}`
+      accessUrl: buildAccessUrl({ candidateId: session.candidateId, sessionId: session.sessionId, accessToken })
     });
-
   } catch (error) {
     console.error('Error creating interview session:', error);
-    res.status(500).json({
+    return res.status(error.status || 400).json({
       success: false,
-      error: 'Failed to create interview session'
+      error: error.message || 'Failed to create interview session',
+      existingSessionId: error.existingSessionId || undefined
     });
   }
 });
 
-// Create session from shortlisted candidate data
-router.post('/create-from-shortlisted', async (req, res) => {
+router.post('/create-from-shortlisted', requireAdmin, async (req, res) => {
   try {
-    const {
-      shortlistedCandidateId,
-      scheduledDate,
-      scheduledTime,
-      duration = 60,
-      timeZone = 'UTC'
-    } = req.body;
-
-    if (!shortlistedCandidateId) {
-      return res.status(400).json({
-        success: false,
-        error: 'shortlistedCandidateId is required'
-      });
-    }
-
-    // In a real scenario, you would fetch from the ShortlistedCandidate collection
-    // For now, I'll create based on the provided data structure
-    const candidateData = {
+    const { shortlistedCandidateId, ...rest } = req.body || {};
+    const { session, accessToken } = await createLegacySession({
+      ...rest,
       candidateId: shortlistedCandidateId,
-      applicationId: req.body.applicationId,
-      jobId: req.body.jobId,
-      recruiterId: req.body.recruiterId,
       candidateDetails: {
-        candidateName: req.body.candidateName,
-        candidateEmail: req.body.candidateEmail,
-        phoneNumber: req.body.phoneNumber,
-        companyName: req.body.companyName,
-        role: req.body.role,
-        techStack: req.body.techStack || [],
-        experience: req.body.experience
+        candidateName: rest.candidateName,
+        candidateEmail: rest.candidateEmail,
+        phoneNumber: rest.phoneNumber,
+        companyName: rest.companyName,
+        role: rest.role,
+        techStack: rest.techStack || [],
+        experience: rest.experience
       }
-    };
-
-    // Use the create endpoint logic
-    req.body = {
-      ...candidateData,
-      scheduledDate,
-      scheduledTime,
-      duration,
-      timeZone
-    };
-
-    // Forward to create endpoint
-    return router.handle({ ...req, url: '/create', method: 'POST' }, res);
-
-  } catch (error) {
-    console.error('Error creating session from shortlisted candidate:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to create session from shortlisted candidate'
     });
+    return res.status(201).json({
+      success: true,
+      sessionId: session.sessionId,
+      accessToken,
+      accessUrl: buildAccessUrl({ candidateId: session.candidateId, sessionId: session.sessionId, accessToken })
+    });
+  } catch (error) {
+    return res.status(error.status || 400).json({ success: false, error: error.message });
   }
 });
 
-// Validate and access session
 router.post('/access', async (req, res) => {
   try {
-    const { sessionId, accessToken } = req.body;
-
+    const { sessionId, accessToken } = req.body || {};
     if (!sessionId || !accessToken) {
-      return res.status(400).json({
-        success: false,
-        error: 'sessionId and accessToken are required'
-      });
+      return res.status(400).json({ success: false, error: 'sessionId and accessToken are required' });
     }
 
-    const session = await InterviewSession.findOne({ sessionId });
+    const auth = await authorizedContextById(sessionId, accessToken);
+    if (auth.error) return res.status(auth.error.status).json({ success: false, error: auth.error.message });
 
-    if (!session) {
-      return res.status(404).json({
-        success: false,
-        error: 'Session not found'
-      });
-    }
-
-    // Check access token
-    if (session.security.accessToken !== accessToken) {
-      // Increment login attempts
-      session.security.loginAttempts += 1;
-      session.security.lastLoginAttempt = new Date();
-      await session.save();
-
-      if (session.security.loginAttempts >= session.security.maxLoginAttempts) {
-        return res.status(423).json({
-          success: false,
-          error: 'Session locked due to too many failed attempts'
-        });
-      }
-
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid access token',
-        attemptsRemaining: session.security.maxLoginAttempts - session.security.loginAttempts
-      });
-    }
-
-    // Reset login attempts on successful access
-    session.security.loginAttempts = 0;
-
-    // Check if session is accessible based on time
-    const now = new Date();
-    const startTime = new Date(session.sessionConfig.scheduledStartTime);
-    const endTime = new Date(session.sessionConfig.scheduledEndTime);
-    const accessStart = new Date(startTime.getTime() - (session.sessionConfig.accessWindow.beforeStart * 60000));
-    const accessEnd = new Date(endTime.getTime() + (session.sessionConfig.accessWindow.afterEnd * 60000));
-
-    if (now < accessStart) {
+    const validation = await activateAndValidate(auth.context);
+    if (!validation.ok) {
       return res.status(403).json({
         success: false,
-        error: 'Interview session not yet accessible',
-        accessibleFrom: accessStart,
-        timeUntilAccess: Math.ceil((accessStart - now) / (1000 * 60)) // minutes
+        error: validation.validation.reason || 'Session is not accessible',
+        accessibleFrom: validation.validation.accessStart,
+        timeUntilAccess: validation.validation.timeToStart
       });
     }
 
-    if (now > accessEnd && session.sessionStatus !== 'active') {
-      session.sessionStatus = 'expired';
-      await session.save();
-      return res.status(403).json({
-        success: false,
-        error: 'Interview session has expired'
-      });
-    }
+    const interviewData = await prepareInterviewData(auth.context.session, auth.context.type);
+    await persistInterviewData(auth.context, interviewData);
 
-    // Activate session if it's the first access during the window
-    if (session.sessionStatus === 'scheduled') {
-      await session.activateSession();
-    }
-
-    // Prepare comprehensive interview data
-    console.log(`🎯 Preparing interview data for session: ${session.sessionId}`);
-    const interviewData = await prepareInterviewData(session.candidateId, session);
-
-    // Store interview data in session for future reference
-    session.interviewData = {
-      ...session.interviewData,
-      candidateProfile: interviewData.candidateProfile,
-      interviewQuestions: interviewData.interviewQuestions,
-      codingTasks: interviewData.codingTasks,
-      systemPrompt: interviewData.systemPrompt,
-      metadata: {
-        ...session.interviewData.metadata,
-        ...interviewData.metadata,
-        dataLoadedAt: new Date().toISOString()
-      }
-    };
-
-    await session.save();
-
-    res.json({
+    return res.json({
       success: true,
       message: 'Session access granted',
-      session: {
-        sessionId: session.sessionId,
-        candidateName: session.candidateDetails.candidateName,
-        role: session.candidateDetails.role,
-        companyName: session.candidateDetails.companyName,
-        scheduledStartTime: session.sessionConfig.scheduledStartTime,
-        scheduledEndTime: session.sessionConfig.scheduledEndTime,
-        duration: session.sessionConfig.duration,
-        status: session.sessionStatus,
-        timeRemaining: Math.max(0, Math.ceil((accessEnd - now) / (1000 * 60))) // minutes
-      },
-      interviewData: {
-        candidateProfile: interviewData.candidateProfile,
-        interviewQuestions: interviewData.interviewQuestions,
-        codingTasks: interviewData.codingTasks,
-        systemPrompt: interviewData.systemPrompt,
-        metadata: interviewData.metadata
-      }
+      session: publicSession(auth.context, accessToken, validation.timing),
+      interviewData
     });
-
   } catch (error) {
-    console.error('Error accessing session:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to access session'
-    });
+    console.error('Error accessing interview session:', error);
+    return res.status(500).json({ success: false, error: 'Failed to access session' });
   }
 });
 
-// Access session by candidate ID (user-friendly access)
 router.post('/access-by-candidate', async (req, res) => {
   try {
-    const { candidateId } = req.body;
-    console.log(`🔍 Access by candidate ID request: ${candidateId}`);
-
-    if (!candidateId) {
+    const { candidateId, accessToken } = req.body || {};
+    if (!candidateId || !accessToken) {
       return res.status(400).json({
         success: false,
-        error: 'candidateId is required'
+        error: 'candidateId and accessToken are required. Use the secure interview link from your invitation.'
       });
     }
 
-    // First check for scheduled sessions (new system)
+    let context = null;
     try {
-      const { getScheduledSessionByCandidate, validateSessionTiming, incrementAccessAttempts, startSession } = await import('../utils/sessionScheduler.js');
-      
-      const scheduledSession = await getScheduledSessionByCandidate(candidateId);
-      
-      if (scheduledSession) {
-        console.log(`🕐 Found scheduled session for candidate: ${candidateId}`);
-        
-        // Validate timing and access
-        const validation = validateSessionTiming(scheduledSession);
-        
-        if (!validation.isValid) {
-          await incrementAccessAttempts(scheduledSession.sessionId);
-          
-          return res.status(403).json({
-            success: false,
-            error: validation.reason,
-            sessionType: 'scheduled',
-            sessionInfo: {
-              candidateName: scheduledSession.candidateName,
-              position: scheduledSession.position,
-              startTime: scheduledSession.startTime,
-              endTime: scheduledSession.endTime,
-              status: scheduledSession.status,
-              timeToStart: validation.timeToStart,
-              timeToEnd: validation.timeToEnd
-            }
-          });
-        }
-
-        // Session is valid - start it if not already active
-        if (scheduledSession.status === 'scheduled') {
-          await startSession(scheduledSession.sessionId);
-          scheduledSession.status = 'active';
-        }
-
-        await incrementAccessAttempts(scheduledSession.sessionId);
-
-        // Return scheduled session data
-        return res.json({
-          success: true,
-          message: 'Scheduled session access granted',
-          sessionType: 'scheduled',
-          session: {
-            sessionId: scheduledSession.sessionId,
-            candidateId: scheduledSession.candidateId,
-            candidateName: scheduledSession.candidateName,
-            position: scheduledSession.position,
-            skills: scheduledSession.interviewConfig?.skills || [],
-            timeRemaining: validation.timeToEnd,
-            isScheduled: true,
-            startTime: scheduledSession.startTime,
-            endTime: scheduledSession.endTime,
-            duration: scheduledSession.duration
-          },
-          initialMessage: `Hello ${scheduledSession.candidateName}! Welcome to your scheduled technical interview for the ${scheduledSession.position} position. You have ${validation.timeToEnd} minutes remaining. Let's begin!`
-        });
-      }
+      const scheduled = await getScheduledSessionByCandidate(candidateId);
+      if (scheduled) context = { type: 'scheduled', session: scheduled };
     } catch (error) {
-      console.log('📝 No scheduled session found, checking legacy sessions...');
+      // Fall through to legacy lookup for local environments without scheduler initialization.
     }
 
-    // Fall back to legacy session system
-    console.log(`🔍 Searching for legacy session with candidateId: ${candidateId}`);
-    
-    let session = null;
-    
-    // Try to match as ObjectId first
-    try {
-      const objectId = new ObjectId(candidateId);
-      session = await InterviewSession.findOne({
-        candidateId: objectId,
-        sessionStatus: { $in: ['scheduled', 'active'] }
-      }).sort({ 'sessionConfig.scheduledStartTime': -1 });
-      
-      if (session) {
-        console.log(`🔍 Legacy session found by ObjectId:`, session.sessionId);
+    if (!context) {
+      const legacy = await findLegacyByCandidate(candidateId);
+      if (legacy) context = { type: 'legacy', session: legacy };
+    }
+
+    if (!context) return res.status(404).json({ success: false, error: 'No active interview session found' });
+    if (!verifySessionToken(context, accessToken)) {
+      if (context.type === 'scheduled') await incrementScheduledAccessAttempts(context.session.sessionId);
+      else {
+        context.session.security.loginAttempts = (context.session.security.loginAttempts || 0) + 1;
+        context.session.security.lastLoginAttempt = new Date();
+        await context.session.save();
       }
-    } catch (err) {
-      console.log(`🔍 ObjectId conversion failed, trying string match...`);
-    }
-    
-    // If no ObjectId match, try string match
-    if (!session) {
-      try {
-        session = await InterviewSession.findOne({
-          candidateId: candidateId,
-          sessionStatus: { $in: ['scheduled', 'active'] }
-        }).sort({ 'sessionConfig.scheduledStartTime': -1 });
-        
-        if (session) {
-          console.log(`🔍 Legacy session found by string match:`, session.sessionId);
-        }
-      } catch (err) {
-        console.error(`🔍 Error searching by string candidateId:`, err);
-      }
-    }
-    
-    console.log(`🔍 Legacy session found:`, !!session);
-    if (session) {
-      console.log(`🔍 Session details: ${session.sessionId}, status: ${session.sessionStatus}`);
+      return res.status(401).json({ success: false, error: 'Invalid interview access token' });
     }
 
-    if (!session) {
-      return res.status(404).json({
-        success: false,
-        error: 'No active interview session found for this candidate',
-        message: 'Please contact your recruiter to schedule an interview session.'
-      });
-    }
-
-    // Check if session is accessible based on time
-    const now = new Date();
-    const startTime = new Date(session.sessionConfig.scheduledStartTime);
-    const endTime = new Date(session.sessionConfig.scheduledEndTime);
-    const accessStart = new Date(startTime.getTime() - (session.sessionConfig.accessWindow.beforeStart * 60000));
-    const accessEnd = new Date(endTime.getTime() + (session.sessionConfig.accessWindow.afterEnd * 60000));
-
-    if (now < accessStart) {
+    const validation = await activateAndValidate(context);
+    if (!validation.ok) {
       return res.status(403).json({
         success: false,
-        error: 'Interview session not yet accessible',
-        message: `Your interview is scheduled for ${startTime.toLocaleString()}. You can access it starting ${accessStart.toLocaleString()}.`,
+        error: validation.validation.reason || 'Session is not accessible',
+        message: validation.validation.reason || 'Session is not accessible',
         sessionInfo: {
-          candidateName: session.candidateDetails.candidateName,
-          role: session.candidateDetails.role,
-          companyName: session.candidateDetails.companyName,
-          scheduledStartTime: session.sessionConfig.scheduledStartTime,
-          accessibleFrom: accessStart,
-          timeUntilAccess: Math.ceil((accessStart - now) / (1000 * 60)) // minutes
+          candidateName: sessionProfile(context.session, context.type).candidateName,
+          role: sessionProfile(context.session, context.type).position,
+          companyName: sessionProfile(context.session, context.type).companyName,
+          scheduledStartTime: context.type === 'scheduled' ? context.session.startTime : context.session.sessionConfig.scheduledStartTime,
+          accessibleFrom: validation.validation.accessStart,
+          timeUntilAccess: validation.validation.timeToStart
         }
       });
     }
 
-    if (now > accessEnd && session.sessionStatus !== 'active') {
-      session.sessionStatus = 'expired';
-      await session.save();
-      return res.status(403).json({
-        success: false,
-        error: 'Interview session has expired',
-        message: 'The access window for your interview has closed. Please contact your recruiter to reschedule.'
-      });
-    }
+    const interviewData = await prepareInterviewData(context.session, context.type);
+    await persistInterviewData(context, interviewData);
 
-    // Activate session if it's the first access during the window
-    if (session.sessionStatus === 'scheduled') {
-      await session.activateSession();
-    }
-
-    // Prepare comprehensive interview data
-    console.log(`🎯 Preparing interview data for candidate: ${candidateId}`);
-    const interviewData = await prepareInterviewData(session.candidateId, session);
-
-    // Store interview data in session for future reference
-    // Initialize interviewData if it doesn't exist or has undefined fields
-    if (!session.interviewData) {
-      session.interviewData = {};
-    }
-    if (!session.interviewData.metadata) {
-      session.interviewData.metadata = {};
-    }
-    if (!session.interviewData.conversationHistory) {
-      session.interviewData.conversationHistory = [];
-    }
-
-    // Update the interview data without overriding schema-required fields
-    session.interviewData.candidateProfile = interviewData.candidateProfile;
-    session.interviewData.interviewQuestions = interviewData.interviewQuestions;
-    session.interviewData.codingTasks = interviewData.codingTasks;
-    session.interviewData.systemPrompt = interviewData.systemPrompt;
-    
-    // Merge metadata safely
-    session.interviewData.metadata = {
-      ...session.interviewData.metadata,
-      ...interviewData.metadata,
-      dataLoadedAt: new Date().toISOString()
-    };
-
-    // Don't touch results field unless we have actual results to save
-    session.markModified('interviewData');
-    await session.save();
-
-    res.json({
+    return res.json({
       success: true,
       message: 'Session access granted',
-      session: {
-        sessionId: session.sessionId,
-        candidateName: session.candidateDetails.candidateName,
-        role: session.candidateDetails.role,
-        companyName: session.candidateDetails.companyName,
-        scheduledStartTime: session.sessionConfig.scheduledStartTime,
-        scheduledEndTime: session.sessionConfig.scheduledEndTime,
-        duration: session.sessionConfig.duration,
-        status: session.sessionStatus,
-        timeRemaining: Math.max(0, Math.ceil((accessEnd - now) / (1000 * 60))), // minutes
-        accessToken: session.security.accessToken // Provide token for subsequent requests
-      },
-      interviewData: {
-        candidateProfile: interviewData.candidateProfile,
-        interviewQuestions: interviewData.interviewQuestions,
-        codingTasks: interviewData.codingTasks,
-        systemPrompt: interviewData.systemPrompt,
-        metadata: interviewData.metadata
-      },
-      accessUrl: `/interview-session?sessionId=${session.sessionId}&token=${session.security.accessToken}`
+      sessionType: context.type,
+      session: publicSession(context, accessToken, validation.timing),
+      interviewData,
+      accessUrl: buildAccessUrl({ candidateId, sessionId: context.session.sessionId, accessToken })
     });
-
   } catch (error) {
-    console.error('Error accessing session by candidate ID:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to access session'
-    });
+    console.error('Error accessing session by candidate:', error);
+    return res.status(500).json({ success: false, error: 'Failed to access session' });
   }
 });
 
-// Get session status
 router.get('/status/:sessionId', async (req, res) => {
   try {
-    const { sessionId } = req.params;
-    const { token } = req.query;
+    const accessToken = req.query.token || req.get('x-interview-token');
+    if (!accessToken) return res.status(400).json({ success: false, error: 'Interview access token is required' });
 
-    const session = await InterviewSession.findOne({ sessionId });
+    const auth = await authorizedContextById(req.params.sessionId, accessToken);
+    if (auth.error) return res.status(auth.error.status).json({ success: false, error: auth.error.message });
 
-    if (!session) {
-      return res.status(404).json({
-        success: false,
-        error: 'Session not found'
-      });
-    }
+    let timing;
+    if (auth.context.type === 'scheduled') timing = validateSessionTiming(auth.context.session);
+    else if (auth.context.type === 'legacy') timing = legacyTiming(auth.context.session);
+    else timing = { isValid: true, timeToStart: 0, timeToEnd: 60 };
 
-    // Basic status check without token
-    if (!token) {
-      return res.json({
-        success: true,
-        status: {
-          sessionId: session.sessionId,
-          status: session.sessionStatus,
-          scheduledStartTime: session.sessionConfig.scheduledStartTime,
-          scheduledEndTime: session.sessionConfig.scheduledEndTime,
-          isAccessible: session.isAccessible
-        }
-      });
-    }
-
-    // Detailed status with valid token
-    if (session.security.accessToken === token) {
-      const now = new Date();
-      const endTime = new Date(session.sessionConfig.scheduledEndTime);
-      const accessEnd = new Date(endTime.getTime() + (session.sessionConfig.accessWindow.afterEnd * 60000));
-
-      return res.json({
-        success: true,
-        status: {
-          sessionId: session.sessionId,
-          candidateName: session.candidateDetails.candidateName,
-          role: session.candidateDetails.role,
-          status: session.sessionStatus,
-          scheduledStartTime: session.sessionConfig.scheduledStartTime,
-          scheduledEndTime: session.sessionConfig.scheduledEndTime,
-          timeRemaining: Math.max(0, Math.ceil((accessEnd - now) / (1000 * 60))),
-          isActive: session.accessControl.isActive,
-          joinedAt: session.accessControl.candidateJoinedAt,
-          totalTimeSpent: session.accessControl.totalTimeSpent
-        }
-      });
-    }
-
-    res.status(401).json({
-      success: false,
-      error: 'Invalid access token'
-    });
-
-  } catch (error) {
-    console.error('Error getting session status:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to get session status'
-    });
-  }
-});
-
-// End session
-router.post('/end/:sessionId', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const { accessToken } = req.body;
-
-    const session = await InterviewSession.findOne({ sessionId });
-
-    if (!session) {
-      return res.status(404).json({
-        success: false,
-        error: 'Session not found'
-      });
-    }
-
-    if (session.security.accessToken !== accessToken) {
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid access token'
-      });
-    }
-
-    await session.completeSession();
-
-    res.json({
+    return res.json({
       success: true,
-      message: 'Session ended successfully',
-      summary: {
-        sessionId: session.sessionId,
-        candidateName: session.candidateDetails.candidateName,
-        totalTimeSpent: session.accessControl.totalTimeSpent,
-        startedAt: session.accessControl.candidateJoinedAt,
-        endedAt: session.accessControl.candidateLeftAt
+      status: {
+        ...publicSession(auth.context, null, timing),
+        isAccessible: Boolean(timing.isValid)
       }
     });
-
   } catch (error) {
-    console.error('Error ending session:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to end session'
-    });
+    return res.status(500).json({ success: false, error: 'Failed to get session status' });
   }
 });
 
-// List sessions (for admin/recruiter)
-router.get('/list', async (req, res) => {
+router.post('/initialize-interview/:sessionId', async (req, res) => {
   try {
-    const { recruiterId, status, candidateId, date } = req.query;
-    
-    const query = {};
-    
-    if (recruiterId) query.recruiterId = new ObjectId(recruiterId);
-    if (status) query.sessionStatus = status;
-    if (candidateId) query.candidateId = new ObjectId(candidateId);
-    
-    if (date) {
-      const startDate = new Date(date);
-      const endDate = new Date(startDate.getTime() + (24 * 60 * 60 * 1000)); // Next day
-      query['sessionConfig.scheduledStartTime'] = {
-        $gte: startDate,
-        $lt: endDate
+    const { accessToken } = req.body || {};
+    const auth = await authorizedContextById(req.params.sessionId, accessToken);
+    if (auth.error) return res.status(auth.error.status).json({ success: false, error: auth.error.message });
+
+    const validation = await activateAndValidate(auth.context);
+    if (!validation.ok) return res.status(403).json({ success: false, error: validation.validation.reason });
+
+    const interviewData = await prepareInterviewData(auth.context.session, auth.context.type);
+    let initialMessage = interviewData.conversationHistory?.find(message => message.role === 'assistant')?.content;
+
+    if (!interviewData.metadata?.interviewStarted || !initialMessage) {
+      const profile = interviewData.candidateProfile || sessionProfile(auth.context.session, auth.context.type);
+      initialMessage = `Hello ${profile.candidateName || 'there'}! Welcome to your technical interview for the ${profile.position || profile.role || 'position'} role. Let's start with: Can you tell me about yourself and your technical background?`;
+      interviewData.conversationHistory = [
+        { role: 'system', content: interviewData.systemPrompt, timestamp: new Date() },
+        { role: 'assistant', content: initialMessage, timestamp: new Date() }
+      ];
+      interviewData.metadata = {
+        ...(interviewData.metadata || {}),
+        interviewStarted: true,
+        startTime: interviewData.metadata?.startTime || new Date(),
+        questionsAsked: interviewData.metadata?.questionsAsked || 1,
+        answersReceived: interviewData.metadata?.answersReceived || 0,
+        codingTestsCompleted: interviewData.metadata?.codingTestsCompleted || 0,
+        awaitingCodingSubmission: false
       };
+      await persistInterviewData(auth.context, interviewData);
+    }
+
+    return res.json({
+      success: true,
+      message: 'Interview session initialized',
+      sessionId: auth.context.session.sessionId,
+      initialMessage,
+      sessionInfo: publicSession(auth.context, accessToken, validation.timing),
+      interviewData
+    });
+  } catch (error) {
+    console.error('Error initializing interview:', error);
+    return res.status(500).json({ success: false, error: 'Failed to initialize interview session' });
+  }
+});
+
+async function generateAiReply(interviewData) {
+  if (!openai) {
+    return 'Thanks for your answer. Could you explain the reasoning behind your approach and one trade-off you considered?';
+  }
+
+  const messages = [
+    { role: 'system', content: interviewData.systemPrompt },
+    ...(interviewData.conversationHistory || [])
+      .filter(message => message.role !== 'system')
+      .slice(-12)
+      .map(message => ({ role: message.role, content: message.content }))
+  ];
+
+  const completion = await openai.chat.completions.create({
+    model: process.env.OPENAI_INTERVIEW_MODEL || 'gpt-4.1-mini',
+    messages,
+    temperature: 0.6,
+    max_tokens: 500
+  });
+  return completion.choices?.[0]?.message?.content?.trim()
+    || 'Thanks. Let’s continue with the next question.';
+}
+
+router.post('/message/:sessionId', async (req, res) => {
+  try {
+    const { message, accessToken, messageType = 'answer', codeResult = null } = req.body || {};
+    if (!accessToken || (!message && messageType !== 'code_result')) {
+      return res.status(400).json({ success: false, error: 'message and accessToken are required' });
+    }
+
+    const auth = await authorizedContextById(req.params.sessionId, accessToken);
+    if (auth.error) return res.status(auth.error.status).json({ success: false, error: auth.error.message });
+
+    const interviewData = await prepareInterviewData(auth.context.session, auth.context.type);
+    interviewData.conversationHistory = Array.isArray(interviewData.conversationHistory)
+      ? interviewData.conversationHistory
+      : [];
+    interviewData.metadata = interviewData.metadata || {};
+
+    if (messageType === 'system') {
+      interviewData.metadata.awaitingCodingSubmission = true;
+      interviewData.metadata.codingStartedAt = new Date();
+      await persistInterviewData(auth.context, interviewData);
+      return res.json({ success: true, message: 'Coding exercise started. The interviewer will wait for the submission.', paused: true });
+    }
+
+    if (interviewData.metadata.awaitingCodingSubmission && messageType !== 'code_result') {
+      return res.json({
+        success: true,
+        message: 'I’ll wait while you complete the coding exercise. Submit it in the editor when you are ready.',
+        paused: true
+      });
+    }
+
+    let userContent = String(message || '').trim();
+    if (messageType === 'code_result') {
+      const code = String(codeResult?.code || '').slice(0, 6000);
+      const resultSummary = String(codeResult?.result || codeResult?.output || '').slice(0, 1500);
+      userContent = `Candidate submitted the coding exercise.${codeResult?.language ? ` Language: ${codeResult.language}.` : ''}${resultSummary ? ` Result: ${resultSummary}` : ''}${code ? `\nCandidate code:\n${code}` : ''}`;
+      interviewData.metadata.awaitingCodingSubmission = false;
+      interviewData.metadata.codingTestsCompleted = (interviewData.metadata.codingTestsCompleted || 0) + 1;
+    }
+
+    interviewData.conversationHistory.push({ role: 'user', content: userContent, timestamp: new Date() });
+    interviewData.metadata.answersReceived = (interviewData.metadata.answersReceived || 0) + 1;
+
+    let aiResponse;
+    try {
+      aiResponse = await generateAiReply(interviewData);
+    } catch (error) {
+      console.error('AI response error:', error);
+      aiResponse = 'Thanks for your answer. I had a temporary AI-service issue, so let’s continue with your reasoning and the trade-offs you considered.';
+    }
+
+    interviewData.conversationHistory.push({ role: 'assistant', content: aiResponse, timestamp: new Date() });
+    interviewData.metadata.questionsAsked = (interviewData.metadata.questionsAsked || 0) + 1;
+    interviewData.metadata.lastMessageAt = new Date();
+    await persistInterviewData(auth.context, interviewData);
+
+    return res.json({
+      success: true,
+      message: aiResponse,
+      aiResponse,
+      response: aiResponse,
+      conversationId: interviewData.conversationHistory.length,
+      metadata: {
+        timestamp: new Date(),
+        messageCount: interviewData.conversationHistory.length
+      }
+    });
+  } catch (error) {
+    console.error('Error processing interview message:', error);
+    return res.status(500).json({ success: false, error: 'Failed to process message' });
+  }
+});
+
+router.get('/coding-tasks/:sessionId', async (req, res) => {
+  try {
+    const accessToken = req.query.token || req.get('x-interview-token');
+    const auth = await authorizedContextById(req.params.sessionId, accessToken);
+    if (auth.error) return res.status(auth.error.status).json({ success: false, error: auth.error.message });
+
+    const interviewData = await prepareInterviewData(auth.context.session, auth.context.type);
+    await persistInterviewData(auth.context, interviewData);
+    return res.json({
+      success: true,
+      sessionId: auth.context.session.sessionId,
+      codingTasks: interviewData.codingTasks || []
+    });
+  } catch (error) {
+    console.error('Error getting coding tasks:', error);
+    return res.status(500).json({ success: false, error: 'Failed to get coding tasks' });
+  }
+});
+
+function buildInterviewResult(context, interviewData) {
+  const profile = interviewData.candidateProfile || sessionProfile(context.session, context.type);
+  const metadata = interviewData.metadata || {};
+  const endTime = new Date();
+  const startTime = metadata.startTime ? new Date(metadata.startTime) : endTime;
+  const durationSeconds = Math.max(0, Math.floor((endTime - startTime) / 1000));
+  const transcript = (interviewData.conversationHistory || [])
+    .filter(message => message.role !== 'system')
+    .map((message, index) => ({
+      sequence: index + 1,
+      role: message.role === 'assistant' ? 'AI Interviewer' : 'Candidate',
+      message: message.content,
+      timestamp: message.timestamp || null
+    }));
+
+  const fileName = `interview_${String(profile.candidateName || 'candidate').replace(/[^a-z0-9]+/gi, '_')}_${Date.now()}.json`;
+  return {
+    fileName,
+    sessionId: context.session.sessionId,
+    candidateInfo: {
+      id: String(context.session.candidateId || ''),
+      name: profile.candidateName || 'Candidate',
+      position: profile.position || profile.role || 'Software Developer',
+      skills: profile.skills || profile.techStack || []
+    },
+    interviewDetails: {
+      startTime,
+      endTime,
+      durationSeconds,
+      duration: `${Math.floor(durationSeconds / 60)}m ${durationSeconds % 60}s`,
+      totalQuestions: metadata.questionsAsked || 0,
+      totalAnswers: metadata.answersReceived || 0,
+      codingTestsCompleted: metadata.codingTestsCompleted || 0
+    },
+    fullTranscript: transcript,
+    savedAt: endTime
+  };
+}
+
+router.post('/end/:sessionId', async (req, res) => {
+  try {
+    const { accessToken } = req.body || {};
+    const auth = await authorizedContextById(req.params.sessionId, accessToken);
+    if (auth.error) return res.status(auth.error.status).json({ success: false, error: auth.error.message });
+
+    const interviewData = await prepareInterviewData(auth.context.session, auth.context.type);
+    const result = buildInterviewResult(auth.context, interviewData);
+
+    if (interviewResultsCollection) {
+      try {
+        await interviewResultsCollection.insertOne(result);
+      } catch (error) {
+        console.error('Unable to persist interview result:', error);
+        return res.status(500).json({ success: false, error: 'Failed to save interview result' });
+      }
+    } else if (process.env.NODE_ENV === 'production') {
+      return res.status(503).json({ success: false, error: 'Interview result storage is not configured' });
+    }
+
+    if (auth.context.type === 'scheduled') {
+      auth.context.session = await completeScheduledSession(auth.context.session.sessionId, {
+        fileName: result.fileName,
+        resultSummary: result.interviewDetails
+      });
+    } else if (auth.context.type === 'legacy') {
+      await auth.context.session.completeSession();
+    } else {
+      auth.context.session.status = 'completed';
+      demoSessions.delete(auth.context.session.sessionId);
+    }
+
+    return res.json({
+      success: true,
+      message: 'Interview completed successfully',
+      fileName: result.fileName,
+      summary: {
+        candidateName: result.candidateInfo.name,
+        duration: result.interviewDetails.duration,
+        questionsAsked: result.interviewDetails.totalQuestions,
+        totalTimeSpent: Math.ceil(result.interviewDetails.durationSeconds / 60)
+      }
+    });
+  } catch (error) {
+    console.error('Error ending interview:', error);
+    return res.status(500).json({ success: false, error: 'Failed to end interview' });
+  }
+});
+
+router.get('/list', requireAdmin, async (req, res) => {
+  try {
+    const query = {};
+    if (req.query.status) query.sessionStatus = req.query.status;
+    if (req.query.recruiterId) {
+      if (!ObjectId.isValid(req.query.recruiterId)) return res.status(400).json({ success: false, error: 'Invalid recruiterId' });
+      query.recruiterId = new ObjectId(req.query.recruiterId);
+    }
+    if (req.query.candidateId) {
+      if (!ObjectId.isValid(req.query.candidateId)) return res.status(400).json({ success: false, error: 'Invalid candidateId' });
+      query.candidateId = new ObjectId(req.query.candidateId);
     }
 
     const sessions = await InterviewSession.find(query)
-      .select('sessionId candidateDetails sessionConfig sessionStatus accessControl createdAt')
-      .sort({ 'sessionConfig.scheduledStartTime': 1 });
+      .select('sessionId candidateId candidateDetails sessionConfig sessionStatus accessControl createdAt')
+      .sort({ 'sessionConfig.scheduledStartTime': -1 });
 
-    res.json({
+    return res.json({
       success: true,
       count: sessions.length,
       sessions: sessions.map(session => ({
         sessionId: session.sessionId,
+        candidateId: String(session.candidateId),
         candidateName: session.candidateDetails.candidateName,
         candidateEmail: session.candidateDetails.candidateEmail,
         role: session.candidateDetails.role,
@@ -1044,699 +975,97 @@ router.get('/list', async (req, res) => {
         scheduledStartTime: session.sessionConfig.scheduledStartTime,
         scheduledEndTime: session.sessionConfig.scheduledEndTime,
         status: session.sessionStatus,
-        isActive: session.accessControl.isActive,
         totalTimeSpent: session.accessControl.totalTimeSpent,
         createdAt: session.createdAt
       }))
     });
-
   } catch (error) {
     console.error('Error listing sessions:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to list sessions'
-    });
+    return res.status(500).json({ success: false, error: 'Failed to list sessions' });
   }
 });
 
-// Update session (reschedule)
-router.put('/update/:sessionId', async (req, res) => {
+router.put('/update/:sessionId', requireAdmin, async (req, res) => {
   try {
-    const { sessionId } = req.params;
-    const {
-      scheduledDate,
-      scheduledTime,
-      duration,
-      accessToken
-    } = req.body;
-
-    const session = await InterviewSession.findOne({ sessionId });
-
-    if (!session) {
-      return res.status(404).json({
-        success: false,
-        error: 'Session not found'
-      });
+    const session = await findLegacyBySessionId(req.params.sessionId);
+    if (!session) return res.status(404).json({ success: false, error: 'Session not found' });
+    if (!['scheduled', 'active'].includes(session.sessionStatus)) {
+      return res.status(400).json({ success: false, error: 'Only scheduled or active sessions can be updated' });
     }
 
-    if (session.security.accessToken !== accessToken) {
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid access token'
-      });
-    }
-
-    if (session.sessionStatus !== 'scheduled') {
-      return res.status(400).json({
-        success: false,
-        error: 'Can only update scheduled sessions'
-      });
-    }
-
-    // Update scheduling if provided
+    const { scheduledDate, scheduledTime, duration, sessionStatus } = req.body || {};
     if (scheduledDate && scheduledTime) {
-      const newStartTime = parseDateTime(scheduledDate, scheduledTime);
-      const newDuration = duration || session.sessionConfig.duration;
-      const newEndTime = new Date(newStartTime.getTime() + (newDuration * 60000));
-
-      session.sessionConfig.scheduledStartTime = newStartTime;
-      session.sessionConfig.scheduledEndTime = newEndTime;
-      session.sessionConfig.duration = newDuration;
+      const start = new Date(`${scheduledDate}T${scheduledTime}`);
+      if (Number.isNaN(start.getTime())) return res.status(400).json({ success: false, error: 'Invalid scheduled date/time' });
+      const minutes = Math.max(1, Number(duration) || session.sessionConfig.duration || 60);
+      session.sessionConfig.scheduledStartTime = start;
+      session.sessionConfig.scheduledEndTime = new Date(start.getTime() + minutes * 60000);
+      session.sessionConfig.duration = minutes;
     }
-
+    if (sessionStatus && ['scheduled', 'active', 'completed', 'expired', 'cancelled'].includes(sessionStatus)) {
+      session.sessionStatus = sessionStatus;
+    }
     await session.save();
-
-    res.json({
-      success: true,
-      message: 'Session updated successfully',
-      sessionDetails: {
-        sessionId: session.sessionId,
-        scheduledStartTime: session.sessionConfig.scheduledStartTime,
-        scheduledEndTime: session.sessionConfig.scheduledEndTime,
-        duration: session.sessionConfig.duration
-      }
-    });
-
+    return res.json({ success: true, message: 'Session updated successfully' });
   } catch (error) {
-    console.error('Error updating session:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to update session'
-    });
+    return res.status(500).json({ success: false, error: 'Failed to update session' });
   }
 });
 
-// Get interview data for a session
-router.get('/interview-data/:sessionId', async (req, res) => {
+router.delete('/cancel/:sessionId', requireAdmin, async (req, res) => {
   try {
-    const { sessionId } = req.params;
-    const { token } = req.query;
-
-    const session = await InterviewSession.findOne({ sessionId });
-
-    if (!session) {
-      return res.status(404).json({
-        success: false,
-        error: 'Session not found'
-      });
-    }
-
-    if (session.security.accessToken !== token) {
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid access token'
-      });
-    }
-
-    // If interview data hasn't been prepared yet, prepare it now
-    let interviewData;
-    if (!session.interviewData?.candidateProfile || !session.interviewData?.interviewQuestions) {
-      console.log(`📋 Interview data not found in session, preparing now...`);
-      interviewData = await prepareInterviewData(session.candidateId, session);
-      
-      // Update session with prepared data
-      session.interviewData = {
-        ...session.interviewData,
-        candidateProfile: interviewData.candidateProfile,
-        interviewQuestions: interviewData.interviewQuestions,
-        codingTasks: interviewData.codingTasks,
-        systemPrompt: interviewData.systemPrompt,
-        metadata: {
-          ...session.interviewData.metadata,
-          ...interviewData.metadata,
-          dataLoadedAt: new Date().toISOString()
-        }
-      };
-      await session.save();
-    } else {
-      // Use existing data from session
-      interviewData = {
-        candidateProfile: session.interviewData.candidateProfile,
-        interviewQuestions: session.interviewData.interviewQuestions,
-        codingTasks: session.interviewData.codingTasks,
-        systemPrompt: session.interviewData.systemPrompt,
-        metadata: session.interviewData.metadata
-      };
-    }
-
-    res.json({
-      success: true,
-      sessionId: session.sessionId,
-      candidateName: session.candidateDetails.candidateName,
-      interviewData
-    });
-
+    const context = await getSessionById(req.params.sessionId);
+    if (!context) return res.status(404).json({ success: false, error: 'Session not found' });
+    if (context.type === 'scheduled') await updateSessionStatus(context.session.sessionId, 'cancelled');
+    else if (context.type === 'legacy') {
+      context.session.sessionStatus = 'cancelled';
+      context.session.accessControl.isActive = false;
+      await context.session.save();
+    } else demoSessions.delete(context.session.sessionId);
+    return res.json({ success: true, message: 'Session cancelled successfully' });
   } catch (error) {
-    console.error('Error getting interview data:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to get interview data'
-    });
+    return res.status(500).json({ success: false, error: 'Failed to cancel session' });
   }
 });
 
-// Initialize interview session for AI interviewer
-router.post('/initialize-interview/:sessionId', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const { accessToken } = req.body;
-
-    const session = await InterviewSession.findOne({ sessionId });
-
-    if (!session) {
-      return res.status(404).json({
-        success: false,
-        error: 'Session not found'
-      });
-    }
-
-    if (session.security.accessToken !== accessToken) {
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid access token'
-      });
-    }
-
-    // Prepare interview data if not already done
-    let interviewData;
-    if (!session.interviewData?.systemPrompt) {
-      interviewData = await prepareInterviewData(session.candidateId, session);
-      
-      // Initialize interviewData safely to avoid undefined fields
-      if (!session.interviewData) {
-        session.interviewData = {};
-      }
-      if (!session.interviewData.metadata) {
-        session.interviewData.metadata = {};
-      }
-      if (!session.interviewData.conversationHistory) {
-        session.interviewData.conversationHistory = [];
-      }
-
-      // Update fields safely
-      session.interviewData.candidateProfile = interviewData.candidateProfile;
-      session.interviewData.interviewQuestions = interviewData.interviewQuestions;
-      session.interviewData.codingTasks = interviewData.codingTasks;
-      session.interviewData.systemPrompt = interviewData.systemPrompt;
-      
-      // Merge metadata safely
-      session.interviewData.metadata = {
-        ...session.interviewData.metadata,
-        ...interviewData.metadata,
-        dataLoadedAt: new Date().toISOString()
-      };
-
-      session.markModified('interviewData');
-    } else {
-      interviewData = {
-        candidateProfile: session.interviewData.candidateProfile,
-        interviewQuestions: session.interviewData.interviewQuestions,
-        codingTasks: session.interviewData.codingTasks,
-        systemPrompt: session.interviewData.systemPrompt,
-        metadata: session.interviewData.metadata
-      };
-    }
-
-    // Initialize conversation with system prompt and welcome message
-    const welcomeMessage = `Hello ${session.candidateDetails.candidateName}! Welcome to your technical interview for the ${session.candidateDetails.role} position at ${session.candidateDetails.companyName}. I'll be asking you some questions today to understand your technical skills and experience better. Let's start with: Can you tell me about yourself and your technical background?`;
-
-    const conversation = [
-      { 
-        role: 'system', 
-        content: interviewData.systemPrompt,
-        timestamp: new Date()
-      },
-      {
-        role: 'assistant',
-        content: welcomeMessage,
-        timestamp: new Date()
-      }
-    ];
-
-    // Store conversation in session
-    session.interviewData.conversationHistory = conversation;
-    session.interviewData.metadata = {
-      ...session.interviewData.metadata,
-      interviewStarted: true,
-      startTime: new Date(),
-      questionsAsked: 0,
-      answersReceived: 0,
-      codingTestsCompleted: 0
-    };
-
-    await session.save();
-
-    res.json({
-      success: true,
-      message: 'Interview session initialized',
-      sessionId: session.sessionId,
-      initialMessage: welcomeMessage,
-      sessionInfo: {
-        sessionId: session.sessionId,
-        accessToken: session.security.accessToken,
-        candidateName: session.candidateDetails.candidateName,
-        candidateId: session.candidateId,
-        role: session.candidateDetails.role,
-        companyName: session.candidateDetails.companyName
-      },
-      interviewData: {
-        candidateProfile: interviewData.candidateProfile,
-        interviewQuestions: interviewData.interviewQuestions,
-        codingTasks: interviewData.codingTasks,
-        systemPrompt: interviewData.systemPrompt,
-        metadata: interviewData.metadata
-      }
-    });
-
-  } catch (error) {
-    console.error('Error initializing interview:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to initialize interview session'
-    });
-  }
-});
-
-// Send message to AI interviewer
-router.post('/message/:sessionId', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const { message, accessToken } = req.body;
-
-    if (!message || !accessToken) {
-      return res.status(400).json({
-        success: false,
-        error: 'message and accessToken are required'
-      });
-    }
-
-    const session = await InterviewSession.findOne({ sessionId });
-
-    if (!session) {
-      return res.status(404).json({
-        success: false,
-        error: 'Session not found'
-      });
-    }
-
-    if (session.security.accessToken !== accessToken) {
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid access token'
-      });
-    }
-
-    // Check if session is active
-    if (session.sessionStatus !== 'active') {
-      return res.status(403).json({
-        success: false,
-        error: 'Session is not active'
-      });
-    }
-
-    // Initialize conversation history if not exists
-    if (!session.interviewData) {
-      session.interviewData = {};
-    }
-    if (!session.interviewData.conversationHistory) {
-      session.interviewData.conversationHistory = [];
-    }
-
-    // Add user message to conversation history
-    const userMessage = {
-      role: 'user',
-      content: message,
-      timestamp: new Date()
-    };
-
-    session.interviewData.conversationHistory.push(userMessage);
-
-    // Generate AI response using OpenAI
-    if (!openai) {
-      return res.status(500).json({
-        success: false,
-        error: 'AI service not available'
-      });
-    }
-
-    try {
-      // Prepare conversation context for OpenAI
-      const messages = [
-        {
-          role: 'system',
-          content: session.interviewData.systemPrompt || generateSystemPrompt(
-            session.interviewData.candidateProfile || session.candidateDetails,
-            session,
-            session.interviewData.interviewQuestions || [],
-            session.interviewData.codingTasks || []
-          )
-        }
-      ];
-
-      // Add recent conversation history (last 10 messages to keep context manageable)
-      const recentMessages = session.interviewData.conversationHistory
-        .slice(-10)
-        .filter(msg => msg.role !== 'system')
-        .map(msg => ({
-          role: msg.role,
-          content: msg.content
-        }));
-
-      messages.push(...recentMessages);
-
-      const completion = await openai.chat.completions.create({
-        model: 'gpt-4.1-mini',
-        messages: messages,
-        temperature: 0.7,
-        max_tokens: 500
-      });
-
-      const aiResponse = completion.choices[0].message.content.trim();
-
-      // Add AI response to conversation history
-      const assistantMessage = {
-        role: 'assistant',
-        content: aiResponse,
-        timestamp: new Date()
-      };
-
-      session.interviewData.conversationHistory.push(assistantMessage);
-
-      // Update metadata
-      if (!session.interviewData.metadata) {
-        session.interviewData.metadata = {};
-      }
-      session.interviewData.metadata.lastMessageAt = new Date();
-      session.interviewData.metadata.answersReceived = (session.interviewData.metadata.answersReceived || 0) + 1;
-
-      // Save session
-      session.markModified('interviewData');
-      await session.save();
-
-      res.json({
-        success: true,
-        message: aiResponse,
-        conversationId: session.interviewData.conversationHistory.length,
-        metadata: {
-          timestamp: assistantMessage.timestamp,
-          messageCount: session.interviewData.conversationHistory.length
-        }
-      });
-
-    } catch (aiError) {
-      console.error('AI response error:', aiError);
-      
-      // Fallback response
-      const fallbackResponse = "I apologize, but I'm having trouble processing your response right now. Could you please repeat your answer?";
-      
-      const assistantMessage = {
-        role: 'assistant',
-        content: fallbackResponse,
-        timestamp: new Date()
-      };
-
-      session.interviewData.conversationHistory.push(assistantMessage);
-      session.markModified('interviewData');
-      await session.save();
-
-      res.json({
-        success: true,
-        message: fallbackResponse,
-        conversationId: session.interviewData.conversationHistory.length,
-        metadata: {
-          timestamp: assistantMessage.timestamp,
-          messageCount: session.interviewData.conversationHistory.length,
-          fallback: true
-        }
-      });
-    }
-
-  } catch (error) {
-    console.error('Error processing message:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to process message'
-    });
-  }
-});
-
-// Get current coding tasks for a session (for AI interviewer synchronization)
-router.get('/coding-tasks/:sessionId', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const { token } = req.query;
-
-    const session = await InterviewSession.findOne({ sessionId });
-
-    if (!session) {
-      return res.status(404).json({
-        success: false,
-        error: 'Session not found'
-      });
-    }
-
-    if (session.security.accessToken !== token) {
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid access token'
-      });
-    }
-
-    // Get coding tasks from session or generate if not available
-    let codingTasks = session.interviewData?.codingTasks;
-    
-    if (!codingTasks || codingTasks.length === 0) {
-      // Generate coding tasks if not available
-      const interviewData = await prepareInterviewData(session.candidateId, session);
-      codingTasks = interviewData.codingTasks;
-      
-      // Update session with new coding tasks
-      if (!session.interviewData) session.interviewData = {};
-      session.interviewData.codingTasks = codingTasks;
-      session.markModified('interviewData');
-      await session.save();
-    }
-
-    res.json({
-      success: true,
-      sessionId: session.sessionId,
-      codingTasks: codingTasks || [],
-      message: codingTasks?.length > 0 ? 'Coding tasks retrieved successfully' : 'No coding tasks available'
-    });
-
-  } catch (error) {
-    console.error('Error getting coding tasks:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to get coding tasks'
-    });
-  }
-});
-
-// Cancel session
-router.delete('/cancel/:sessionId', async (req, res) => {
-  try {
-    const { sessionId } = req.params;
-    const { accessToken } = req.body;
-
-    const session = await InterviewSession.findOne({ sessionId });
-
-    if (!session) {
-      return res.status(404).json({
-        success: false,
-        error: 'Session not found'
-      });
-    }
-
-    if (session.security.accessToken !== accessToken) {
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid access token'
-      });
-    }
-
-    session.sessionStatus = 'cancelled';
-    session.accessControl.isActive = false;
-    await session.save();
-
-    res.json({
-      success: true,
-      message: 'Session cancelled successfully'
-    });
-
-  } catch (error) {
-    console.error('Error cancelling session:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to cancel session'
-    });
-  }
-});
-
-// Demo endpoint: Create and access a dummy candidate session for testing
-router.post('/demo-candidate', async (req, res) => {
-  try {
-    console.log('🎮 Creating demo candidate session...');
-
-    // Generate a demo candidate ID
-    const demoCandidateId = new ObjectId();
-    const sessionId = `demo-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    const accessToken = generateAccessToken();
-
-    // Create a demo candidate profile
-    const demoProfile = {
-      candidateName: 'Demo Candidate',
-      position: 'Full Stack Developer',
-      companyName: 'Tech Corp',
-      email: 'demo@example.com',
-      skills: ['JavaScript', 'React', 'Node.js', 'MongoDB', 'REST APIs'],
-      experience: '2-3 years',
-      projectDetails: 'Built several full-stack web applications'
-    };
-
-    // Generate or get questions and coding tasks
-    const questions = getDefaultQuestions();
-    const codingTasks = getDefaultCodingTasks();
-
-    // If using MongoDB, create an interview session
-    if (InterviewSession) {
-      try {
-        const newSession = new InterviewSession({
-          sessionId,
-          candidateId: demoCandidateId,
-          applicationId: new ObjectId(),
-          jobId: new ObjectId(),
-          recruiterId: new ObjectId(),
-          candidateDetails: {
-            candidateName: demoProfile.candidateName,
-            candidateEmail: demoProfile.email,
-            companyName: demoProfile.companyName,
-            role: demoProfile.position,
-            techStack: demoProfile.skills,
-            experience: demoProfile.experience
-          },
-          sessionConfig: {
-            scheduledStartTime: new Date(),
-            scheduledEndTime: new Date(Date.now() + 60 * 60 * 1000), // 1 hour from now
-            duration: 60
-          },
-          sessionStatus: 'active',
-          accessControl: {
-            isActive: true,
-            accessStartTime: new Date(),
-            accessEndTime: new Date(Date.now() + 60 * 60 * 1000)
-          },
-          security: {
-            accessToken
-          },
-          interviewData: {
-            conversationHistory: [{
-              role: 'system',
-              content: `You are conducting a technical interview with ${demoProfile.candidateName} for the ${demoProfile.position} position.`,
-              timestamp: new Date()
-            }],
-            metadata: {
-              startTime: new Date(),
-              questionsAsked: 0,
-              answersReceived: 0
-            }
-          },
-          questions,
-          codingTasks
-        });
-
-        await newSession.save();
-        console.log(`✅ Demo session created: ${sessionId}`);
-      } catch (dbErr) {
-        console.warn('⚠️ Could not save to MongoDB, proceeding with in-memory session:', dbErr.message);
-      }
-    }
-
-    // Return demo session data
-    res.json({
-      success: true,
-      message: 'Demo candidate session created',
-      sessionType: 'demo',
-      session: {
-        sessionId,
-        candidateId: demoCandidateId.toString(),
-        candidateName: demoProfile.candidateName,
-        position: demoProfile.position,
-        skills: demoProfile.skills,
-        companyName: demoProfile.companyName,
-        isScheduled: false
-      },
-      accessToken,
-      initialMessage: `Hello ${demoProfile.candidateName}! Welcome to your AI Technical Interview for the ${demoProfile.position} position. This is a demo session. Let's begin!`,
-      questions,
-      codingTasks
-    });
-
-  } catch (error) {
-    console.error('Error creating demo candidate session:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to create demo session',
-      details: error.message
-    });
-  }
-});
-
-// Demo endpoint: Access demo candidate by simple string ID (no MongoDB required)
 router.post('/access-demo/:candidateId', async (req, res) => {
-  try {
-    const { candidateId } = req.params;
+  if (!isDemoEnabled()) return res.status(404).json({ success: false, error: 'Demo mode is disabled' });
 
-    // Check if this is a demo ID request (e.g., "demo", "test", "demouser", etc.)
-    if (!candidateId || (candidateId !== 'demo' && !candidateId.startsWith('demo-'))) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid demo candidate ID'
-      });
-    }
+  const candidateId = req.params.candidateId || 'demo';
+  const accessToken = generateAccessToken();
+  const sessionId = `demo_${cryptoRandomId()}`;
+  const profile = {
+    candidateName: 'Demo Candidate',
+    companyName: 'Demo Company',
+    position: 'Full Stack Developer',
+    skills: ['JavaScript', 'React', 'Node.js', 'MongoDB']
+  };
+  const session = {
+    sessionId,
+    candidateId,
+    status: 'active',
+    profile,
+    security: { accessToken },
+    interviewData: null
+  };
+  demoSessions.set(sessionId, session);
+  const context = { type: 'demo', session };
+  const interviewData = await prepareInterviewData(session, 'demo');
+  await persistInterviewData(context, interviewData);
 
-    console.log(`🎮 Accessing demo session for: ${candidateId}`);
-
-    const sessionId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    const accessToken = generateAccessToken();
-
-    const demoProfile = {
-      candidateName: candidateId === 'demo' ? 'Demo Candidate' : `Demo User - ${candidateId}`,
-      position: 'Full Stack Developer',
-      companyName: 'Tech Corp',
-      skills: ['JavaScript', 'React', 'Node.js', 'MongoDB', 'REST APIs'],
-      experience: '2-3 years'
-    };
-
-    const questions = getDefaultQuestions();
-    const codingTasks = getDefaultCodingTasks();
-
-    res.json({
-      success: true,
-      message: 'Demo session access granted',
-      sessionType: 'demo',
-      session: {
-        sessionId,
-        candidateId,
-        candidateName: demoProfile.candidateName,
-        position: demoProfile.position,
-        skills: demoProfile.skills,
-        companyName: demoProfile.companyName,
-        isScheduled: false
-      },
-      accessToken,
-      initialMessage: `Hello ${demoProfile.candidateName}! Welcome to your AI Technical Interview for the ${demoProfile.position} position. This is a demo session for testing purposes. Let's begin!`,
-      questions,
-      codingTasks
-    });
-
-  } catch (error) {
-    console.error('Error accessing demo session:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to access demo session',
-      details: error.message
-    });
-  }
+  return res.json({
+    success: true,
+    sessionType: 'demo',
+    session: publicSession(context, accessToken),
+    accessToken,
+    interviewData,
+    initialMessage: `Hello! Welcome to your demo technical interview for the ${profile.position} role.`
+  });
 });
+
+router.post('/demo-candidate', async (req, res) => {
+  req.params.candidateId = 'demo';
+  return router.handle({ ...req, url: '/access-demo/demo', method: 'POST' }, res);
+});
+
 export default router;

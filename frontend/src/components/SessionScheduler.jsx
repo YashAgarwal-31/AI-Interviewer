@@ -1,367 +1,61 @@
-import { useEffect, useState } from 'react';
-import config from '../config';
+import { CalendarPlus, Copy, Mail, RefreshCw, Search, Send, XCircle } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useAuth } from '../auth/AuthContext'
 
-const SessionScheduler = () => {
-    const [sessions, setSessions] = useState([]);
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState('');
-    const [success, setSuccess] = useState('');
-    
-    const [formData, setFormData] = useState({
-        candidateId: '',
-        candidateName: '',
-        position: '',
-        startTime: '',
-        endTime: '',
-        duration: 60,
-        skills: '',
-        experienceLevel: 'intermediate',
-        focusAreas: 'technical,problem-solving',
-        allowCodeEditor: true,
-        customQuestions: '',
-        notes: ''
-    });
+const emptyForm = {
+  candidateId: '', candidateName: '', candidateEmail: '', companyName: '', position: 'Software Developer',
+  startTime: '', endTime: '', skills: '', experienceLevel: 'intermediate', focusAreas: 'technical,problem-solving',
+  allowCodeEditor: true, customQuestions: '', notes: ''
+}
+const statusOptions = ['all', 'scheduled', 'active', 'completed', 'expired', 'cancelled']
+const formatDateTime = value => value ? new Date(value).toLocaleString() : '—'
+const statusClass = status => ({ scheduled: 'bg-blue-50 text-blue-700 border-blue-200', active: 'bg-emerald-50 text-emerald-700 border-emerald-200', completed: 'bg-slate-100 text-slate-700 border-slate-200', expired: 'bg-amber-50 text-amber-700 border-amber-200', cancelled: 'bg-red-50 text-red-700 border-red-200' }[status] || 'bg-slate-100 text-slate-600 border-slate-200')
+function durationMinutes(startTime, endTime) { const start = new Date(startTime); const end = new Date(endTime); return Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end <= start ? null : Math.ceil((end - start) / 60000) }
 
-    // Load existing sessions
-    useEffect(() => {
-        loadSessions();
-    }, []);
+export default function SessionScheduler() {
+  const { apiFetch, user } = useAuth()
+  const [sessions, setSessions] = useState([]); const [formData, setFormData] = useState(emptyForm)
+  const [loading, setLoading] = useState(false); const [loadingSessions, setLoadingSessions] = useState(true); const [actionId, setActionId] = useState('')
+  const [error, setError] = useState(''); const [success, setSuccess] = useState(''); const [inviteUrl, setInviteUrl] = useState('')
+  const [statusFilter, setStatusFilter] = useState('all'); const [query, setQuery] = useState('')
 
-    const loadSessions = async () => {
-        try {
-            const response = await fetch(`${config.AI_BACKEND_URL}/api/scheduled-sessions/list`);
-            const data = await response.json();
-            
-            if (data.success) {
-                setSessions(data.sessions);
-            } else {
-                setError('Failed to load sessions');
-            }
-        } catch (err) {
-            setError('Error loading sessions: ' + err.message);
-        }
-    };
+  const loadSessions = useCallback(async () => { setLoadingSessions(true); try { setError(''); const params = new URLSearchParams(); if (statusFilter !== 'all') params.set('status', statusFilter); const data = await apiFetch(`/api/scheduled-sessions/list${params.toString() ? `?${params}` : ''}`); setSessions(data.sessions || []) } catch (err) { setError(err.message) } finally { setLoadingSessions(false) } }, [apiFetch, statusFilter])
+  useEffect(() => { loadSessions() }, [loadSessions])
+  const visibleSessions = useMemo(() => { const value = query.trim().toLowerCase(); return value ? sessions.filter(session => [session.candidateName, session.candidateId, session.candidateEmail, session.position, session.sessionId].filter(Boolean).some(item => String(item).toLowerCase().includes(value))) : sessions }, [query, sessions])
+  const duration = useMemo(() => durationMinutes(formData.startTime, formData.endTime), [formData.endTime, formData.startTime])
+  const change = event => { const { name, value, type, checked } = event.target; setFormData(previous => ({ ...previous, [name]: type === 'checkbox' ? checked : value })) }
 
-    const handleInputChange = (e) => {
-        const { name, value, type, checked } = e.target;
-        setFormData(prev => ({
-            ...prev,
-            [name]: type === 'checkbox' ? checked : value
-        }));
-    };
+  const schedule = async event => {
+    event.preventDefault(); setError(''); setSuccess(''); setInviteUrl('')
+    const minutes = durationMinutes(formData.startTime, formData.endTime); const end = new Date(formData.endTime)
+    if (!minutes) return setError('End time must be after start time.')
+    if (end <= new Date()) return setError('Interview end time must be in the future.')
+    if (minutes < 15 || minutes > 240) return setError('Interview duration must be between 15 and 240 minutes.')
+    setLoading(true)
+    try {
+      const data = await apiFetch('/api/scheduled-sessions/create', { method: 'POST', body: JSON.stringify({ ...formData, skills: formData.skills.split(',').map(v => v.trim()).filter(Boolean), focusAreas: formData.focusAreas.split(',').map(v => v.trim()).filter(Boolean), customQuestions: formData.customQuestions.split('\n').map(v => v.trim()).filter(Boolean), accessWindow: { beforeStart: 15, afterEnd: 15 }, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' }) })
+      setSuccess(`Interview scheduled for ${data.session.candidateName}. Copy or email the secure link before the interview starts.`); setInviteUrl(data.session.accessUrl || ''); setFormData(emptyForm); await loadSessions()
+    } catch (err) { setError(err.message) } finally { setLoading(false) }
+  }
+  const copyInvite = async () => { try { await navigator.clipboard.writeText(inviteUrl); setSuccess('Secure interview link copied.') } catch { setError('Automatic copy failed. Select the link and copy it manually.') } }
+  const emailAction = async (session, reminder = false) => {
+    if (session.status !== 'scheduled') return setError('Invite links cannot be rotated after an interview has started.')
+    setActionId(`${reminder ? 'reminder' : 'invite'}:${session.sessionId}`); setError(''); setSuccess('')
+    try { const data = await apiFetch(reminder ? '/api/email/send-reminder' : '/api/email/send-session-invite', { method: 'POST', body: JSON.stringify({ candidateId: session.candidateId, sessionId: session.sessionId, ...(reminder ? { minutesUntilStart: 15 } : {}) }) }); setInviteUrl(data.data?.sessionUrl || ''); setSuccess(`${reminder ? 'Reminder' : 'Invite'} sent to ${data.data?.candidateEmail || session.candidateEmail}. The previous link is now invalid.`); await loadSessions() } catch (err) { setError(err.message) } finally { setActionId('') }
+  }
+  const cancel = async session => { if (!window.confirm(`Cancel the interview for ${session.candidateName}?`)) return; setActionId(`cancel:${session.sessionId}`); try { await apiFetch(`/api/scheduled-sessions/update/${encodeURIComponent(session.sessionId)}`, { method: 'PUT', body: JSON.stringify({ status: 'cancelled' }) }); setSuccess(`Interview for ${session.candidateName} was cancelled.`); await loadSessions() } catch (err) { setError(err.message) } finally { setActionId('') } }
 
-    const handleSubmit = async (e) => {
-        e.preventDefault();
-        setLoading(true);
-        setError('');
-        setSuccess('');
-
-        try {
-            // Prepare the data
-            const sessionData = {
-                ...formData,
-                skills: formData.skills.split(',').map(s => s.trim()).filter(Boolean),
-                focusAreas: formData.focusAreas.split(',').map(s => s.trim()).filter(Boolean),
-                customQuestions: formData.customQuestions.split('\n').map(q => q.trim()).filter(Boolean)
-            };
-
-            const response = await fetch(`${config.AI_BACKEND_URL}/api/scheduled-sessions/create`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(sessionData)
-            });
-
-            const data = await response.json();
-
-            if (data.success) {
-                setSuccess(`Session created successfully! Session ID: ${data.session.sessionId}`);
-                setFormData({
-                    candidateId: '',
-                    candidateName: '',
-                    position: '',
-                    startTime: '',
-                    endTime: '',
-                    duration: 60,
-                    skills: '',
-                    experienceLevel: 'intermediate',
-                    focusAreas: 'technical,problem-solving',
-                    allowCodeEditor: true,
-                    customQuestions: '',
-                    notes: ''
-                });
-                loadSessions(); // Reload the sessions list
-            } else {
-                setError(data.error || 'Failed to create session');
-            }
-        } catch (err) {
-            setError('Error creating session: ' + err.message);
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const formatDateTime = (dateStr) => {
-        return new Date(dateStr).toLocaleString();
-    };
-
-    const getStatusColor = (status) => {
-        switch (status) {
-            case 'scheduled': return 'text-blue-600 bg-blue-100';
-            case 'active': return 'text-green-600 bg-green-100';
-            case 'completed': return 'text-gray-600 bg-gray-100';
-            case 'expired': return 'text-red-600 bg-red-100';
-            case 'cancelled': return 'text-orange-600 bg-orange-100';
-            default: return 'text-gray-600 bg-gray-100';
-        }
-    };
-
-    return (
-        <div className="max-w-6xl mx-auto p-6">
-            <div className="mb-8">
-                <h1 className="text-3xl font-bold text-gray-800 mb-2">Session Scheduler</h1>
-                <p className="text-gray-600">Create and manage time-bound interview sessions for candidates</p>
-            </div>
-
-            {error && (
-                <div className="mb-4 p-4 bg-red-100 border border-red-300 text-red-700 rounded-lg">
-                    {error}
-                </div>
-            )}
-
-            {success && (
-                <div className="mb-4 p-4 bg-green-100 border border-green-300 text-green-700 rounded-lg">
-                    {success}
-                </div>
-            )}
-
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                {/* Create Session Form */}
-                <div className="bg-white rounded-lg shadow-md p-6">
-                    <h2 className="text-xl font-semibold text-gray-800 mb-4">Create New Session</h2>
-                    
-                    <form onSubmit={handleSubmit} className="space-y-4">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">
-                                    Candidate ID *
-                                </label>
-                                <input
-                                    type="text"
-                                    name="candidateId"
-                                    value={formData.candidateId}
-                                    onChange={handleInputChange}
-                                    className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                                    required
-                                    placeholder="e.g., CAND001"
-                                />
-                            </div>
-                            
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">
-                                    Candidate Name *
-                                </label>
-                                <input
-                                    type="text"
-                                    name="candidateName"
-                                    value={formData.candidateName}
-                                    onChange={handleInputChange}
-                                    className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                                    required
-                                    placeholder="Full Name"
-                                />
-                            </div>
-                        </div>
-
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                                Position
-                            </label>
-                            <input
-                                type="text"
-                                name="position"
-                                value={formData.position}
-                                onChange={handleInputChange}
-                                className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                                placeholder="e.g., Software Developer"
-                            />
-                        </div>
-
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">
-                                    Start Time *
-                                </label>
-                                <input
-                                    type="datetime-local"
-                                    name="startTime"
-                                    value={formData.startTime}
-                                    onChange={handleInputChange}
-                                    className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                                    required
-                                />
-                            </div>
-                            
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">
-                                    End Time *
-                                </label>
-                                <input
-                                    type="datetime-local"
-                                    name="endTime"
-                                    value={formData.endTime}
-                                    onChange={handleInputChange}
-                                    className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                                    required
-                                />
-                            </div>
-                        </div>
-
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                                Duration (minutes)
-                            </label>
-                            <input
-                                type="number"
-                                name="duration"
-                                value={formData.duration}
-                                onChange={handleInputChange}
-                                min="15"
-                                max="180"
-                                className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                            />
-                        </div>
-
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                                Skills (comma-separated)
-                            </label>
-                            <input
-                                type="text"
-                                name="skills"
-                                value={formData.skills}
-                                onChange={handleInputChange}
-                                className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                                placeholder="JavaScript, React, Node.js"
-                            />
-                        </div>
-
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                                Experience Level
-                            </label>
-                            <select
-                                name="experienceLevel"
-                                value={formData.experienceLevel}
-                                onChange={handleInputChange}
-                                className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                            >
-                                <option value="junior">Junior</option>
-                                <option value="intermediate">Intermediate</option>
-                                <option value="senior">Senior</option>
-                            </select>
-                        </div>
-
-                        <div>
-                            <label className="flex items-center">
-                                <input
-                                    type="checkbox"
-                                    name="allowCodeEditor"
-                                    checked={formData.allowCodeEditor}
-                                    onChange={handleInputChange}
-                                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                                />
-                                <span className="ml-2 text-sm font-medium text-gray-700">
-                                    Allow Code Editor
-                                </span>
-                            </label>
-                        </div>
-
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                                Custom Questions (one per line)
-                            </label>
-                            <textarea
-                                name="customQuestions"
-                                value={formData.customQuestions}
-                                onChange={handleInputChange}
-                                rows="4"
-                                className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                                placeholder="Tell me about your experience with React
-How do you handle state management?
-Describe your testing approach"
-                            />
-                        </div>
-
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                                Notes
-                            </label>
-                            <textarea
-                                name="notes"
-                                value={formData.notes}
-                                onChange={handleInputChange}
-                                rows="2"
-                                className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                                placeholder="Additional notes for this session..."
-                            />
-                        </div>
-
-                        <button
-                            type="submit"
-                            disabled={loading}
-                            className="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-md transition-colors duration-200 disabled:opacity-50"
-                        >
-                            {loading ? 'Creating Session...' : 'Create Session'}
-                        </button>
-                    </form>
-                </div>
-
-                {/* Sessions List */}
-                <div className="bg-white rounded-lg shadow-md p-6">
-                    <div className="flex justify-between items-center mb-4">
-                        <h2 className="text-xl font-semibold text-gray-800">Scheduled Sessions</h2>
-                        <button
-                            onClick={loadSessions}
-                            className="text-blue-600 hover:text-blue-700 text-sm font-medium"
-                        >
-                            Refresh
-                        </button>
-                    </div>
-
-                    <div className="space-y-3 max-h-96 overflow-y-auto">
-                        {sessions.map((session) => (
-                            <div key={session.sessionId} className="border border-gray-200 rounded-lg p-4">
-                                <div className="flex justify-between items-start mb-2">
-                                    <div>
-                                        <h3 className="font-medium text-gray-900">{session.candidateName}</h3>
-                                        <p className="text-sm text-gray-600">{session.position}</p>
-                                    </div>
-                                    <span className={`px-2 py-1 text-xs font-medium rounded-full ${getStatusColor(session.status)}`}>
-                                        {session.status}
-                                    </span>
-                                </div>
-                                
-                                <div className="text-sm text-gray-600 space-y-1">
-                                    <p><span className="font-medium">ID:</span> {session.candidateId}</p>
-                                    <p><span className="font-medium">Start:</span> {formatDateTime(session.startTime)}</p>
-                                    <p><span className="font-medium">End:</span> {formatDateTime(session.endTime)}</p>
-                                    <p><span className="font-medium">Access Attempts:</span> {session.accessAttempts}</p>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                    
-                    {sessions.length === 0 && (
-                        <div className="text-center text-gray-500 py-8">
-                            No scheduled sessions found
-                        </div>
-                    )}
-                </div>
-            </div>
-        </div>
-    );
-};
-
-export default SessionScheduler;
+  return <div className="space-y-6">
+    <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><p className="text-sm font-medium text-blue-600">Interview operations</p><h1 className="mt-1 text-3xl font-semibold text-slate-950">Interviews</h1><p className="mt-2 text-sm text-slate-500">Schedule signed sessions, deliver secure links, and manage live interview state.</p></div><button onClick={loadSessions} disabled={loadingSessions} className="inline-flex items-center justify-center gap-2 rounded-lg border bg-white px-4 py-2.5 text-sm font-medium disabled:opacity-50"><RefreshCw size={16} className={loadingSessions ? 'animate-spin' : ''} /> Refresh</button></div>
+    {error && <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>}{success && <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-700">{success}</div>}
+    {inviteUrl && <div className="rounded-xl border border-blue-200 bg-blue-50 p-4"><div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="font-semibold text-blue-950">Current secure candidate link</p><p className="text-xs text-blue-700">Treat this link like a password. A successful resend invalidates the previous link.</p></div><button onClick={copyInvite} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white"><Copy size={15} /> Copy</button></div><input readOnly value={inviteUrl} className="mt-3 w-full rounded-lg border border-blue-200 bg-white px-3 py-2 text-xs" /></div>}
+    <div className="grid items-start gap-6 xl:grid-cols-[0.8fr_1.2fr]">
+      <form onSubmit={schedule} className="space-y-4 rounded-xl border bg-white p-5 shadow-sm xl:sticky xl:top-24"><div className="flex items-center gap-2"><CalendarPlus size={19} className="text-blue-600" /><div><h2 className="font-semibold">Schedule interview</h2><p className="text-xs text-slate-500">Signed in as {user?.name}</p></div></div>
+        <div className="grid gap-3 sm:grid-cols-2"><input required name="candidateId" value={formData.candidateId} onChange={change} placeholder="Candidate ID" className="rounded-lg border px-3 py-2.5 text-sm" /><input required name="candidateName" value={formData.candidateName} onChange={change} placeholder="Candidate name" className="rounded-lg border px-3 py-2.5 text-sm" /><input type="email" name="candidateEmail" value={formData.candidateEmail} onChange={change} placeholder="Candidate email" className="rounded-lg border px-3 py-2.5 text-sm" /><input name="companyName" value={formData.companyName} onChange={change} placeholder="Company" className="rounded-lg border px-3 py-2.5 text-sm" /></div>
+        <input name="position" value={formData.position} onChange={change} placeholder="Position / role" className="w-full rounded-lg border px-3 py-2.5 text-sm" /><div className="grid gap-3 sm:grid-cols-2"><label className="text-xs font-medium">Start time<input required type="datetime-local" name="startTime" value={formData.startTime} onChange={change} className="mt-1 w-full rounded-lg border px-3 py-2.5 text-sm" /></label><label className="text-xs font-medium">End time<input required type="datetime-local" name="endTime" value={formData.endTime} onChange={change} className="mt-1 w-full rounded-lg border px-3 py-2.5 text-sm" /></label></div><p className="text-xs text-slate-500">Calculated duration: {duration ? `${duration} minutes` : '—'}</p>
+        <div className="grid gap-3 sm:grid-cols-2"><select name="experienceLevel" value={formData.experienceLevel} onChange={change} className="rounded-lg border px-3 py-2.5 text-sm"><option value="junior">Junior</option><option value="intermediate">Intermediate</option><option value="senior">Senior</option></select><input name="focusAreas" value={formData.focusAreas} onChange={change} placeholder="Focus areas" className="rounded-lg border px-3 py-2.5 text-sm" /></div><input name="skills" value={formData.skills} onChange={change} placeholder="Skills: React, Node.js, C++" className="w-full rounded-lg border px-3 py-2.5 text-sm" /><textarea name="customQuestions" value={formData.customQuestions} onChange={change} rows="3" placeholder="Optional custom questions, one per line" className="w-full rounded-lg border px-3 py-2.5 text-sm" /><textarea name="notes" value={formData.notes} onChange={change} rows="2" placeholder="Internal recruiter notes" className="w-full rounded-lg border px-3 py-2.5 text-sm" /><label className="flex items-center gap-2 text-sm"><input type="checkbox" name="allowCodeEditor" checked={formData.allowCodeEditor} onChange={change} /> Enable coding exercise</label><button disabled={loading} className="w-full rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50">{loading ? 'Scheduling…' : 'Schedule secure interview'}</button>
+      </form>
+      <section className="overflow-hidden rounded-xl border bg-white shadow-sm"><div className="flex flex-col gap-3 border-b p-4 md:flex-row"><div className="relative flex-1"><Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" /><input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search candidate, email, role, session…" className="w-full rounded-lg border py-2 pl-9 pr-3 text-sm" /></div><select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className="rounded-lg border px-3 py-2 text-sm">{statusOptions.map(status => <option key={status} value={status}>{status === 'all' ? 'All statuses' : status}</option>)}</select></div><div className="divide-y">{visibleSessions.map(session => { const canInvite = session.status === 'scheduled'; const canCancel = ['scheduled', 'active'].includes(session.status); const hasEmail = Boolean(session.candidateEmail); return <article key={session.sessionId} className="p-4 sm:p-5"><div className="flex justify-between gap-3"><div className="min-w-0"><p className="truncate font-semibold">{session.candidateName}</p><p className="truncate text-sm text-slate-500">{session.position || 'Interview'} · {session.candidateEmail || session.candidateId}</p></div><span className={`h-fit rounded-full border px-2.5 py-1 text-xs capitalize ${statusClass(session.status)}`}>{session.status}</span></div><div className="mt-4 grid gap-2 text-xs text-slate-500 sm:grid-cols-2"><p>Start: {formatDateTime(session.startTime)}</p><p>End: {formatDateTime(session.endTime)}</p><p className="truncate">Session: {session.sessionId}</p><p>Failed access: {session.accessAttempts || 0}</p></div>{(canInvite || canCancel) && <div className="mt-4 flex flex-wrap gap-2">{canInvite && <><button disabled={!hasEmail || Boolean(actionId)} onClick={() => emailAction(session)} className="inline-flex items-center gap-1 rounded-md border border-blue-200 px-2.5 py-1.5 text-xs text-blue-700 disabled:opacity-40"><Mail size={14} /> Send invite</button><button disabled={!hasEmail || Boolean(actionId)} onClick={() => emailAction(session, true)} className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-xs disabled:opacity-40"><Send size={14} /> Reminder</button></>}{canCancel && <button disabled={Boolean(actionId)} onClick={() => cancel(session)} className="inline-flex items-center gap-1 rounded-md border border-red-200 px-2.5 py-1.5 text-xs text-red-700 disabled:opacity-40"><XCircle size={14} /> Cancel</button>}</div>}</article>})}{!loadingSessions && !visibleSessions.length && <p className="py-14 text-center text-sm text-slate-500">No interviews match the filters.</p>}{loadingSessions && <p className="py-14 text-center text-sm text-slate-500">Loading interviews…</p>}</div></section>
+    </div>
+  </div>
+}
