@@ -5,15 +5,10 @@ const aiBackendUrl = removeTrailingSlash(
   import.meta.env.VITE_AI_BACKEND_URL || 'http://localhost:3000'
 )
 
-const recruiterBackendUrl = removeTrailingSlash(
-  import.meta.env.VITE_RECRUITER_BACKEND_URL || 'http://localhost:5000'
-)
-
 const codeEditorUrl = import.meta.env.VITE_CODE_EDITOR_URL || 'https://ai-code-editor-psi-two.vercel.app/'
 
 const config = Object.freeze({
   AI_BACKEND_URL: aiBackendUrl,
-  RECRUITER_BACKEND_URL: recruiterBackendUrl,
   CODE_EDITOR_URL: codeEditorUrl
 })
 

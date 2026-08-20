@@ -23,9 +23,8 @@ export default defineConfig([
       },
     },
     rules: {
-      // Keep cleanup visible in CI without blocking production builds for
-      // harmless legacy variables inside the large interview UI component.
-      'no-unused-vars': ['warn', { varsIgnorePattern: '^[A-Z_]', argsIgnorePattern: '^_' }],
+      // `Icon` is a dynamically selected JSX component in navigation/card maps.
+      'no-unused-vars': ['warn', { varsIgnorePattern: '^[A-Z_]', argsIgnorePattern: '^(?:_|Icon$)' }],
       'no-empty': ['warn', { allowEmptyCatch: true }],
     },
   },
