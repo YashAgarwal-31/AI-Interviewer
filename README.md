@@ -12,32 +12,6 @@ The project is built as a **production-oriented single-workspace platform** with
 
 > **Deployment status:** the application is code/build ready. Before inviting real candidates, deploy the production services and complete the live browser/provider smoke test in [DEPLOYMENT.md](./DEPLOYMENT.md).
 
-## Product Preview
-
-### Recruiter & Candidate Portal
-![Recruiter and candidate portal](Images/job%20portal%20for%20recruiter%20and%20candidate.png)
-
-### Candidate Shortlisting
-![Candidate shortlisting](Images/Candidate%20shortlisting.png)
-
-### Interview Scheduling Process
-![Interview scheduling workflow](Images/Interview%20Scheduling%20process.png)
-
-### AI Interview Scheduler
-![AI interview scheduler](Images/Ai-interview%20scheduler.png)
-
-### Secure Candidate Interview Entry
-![Candidate interview entry](Images/candidate%20entry%20for%20interview%20session.png)
-
-### AI Interview Experience
-![AI interviewer for candidate](Images/Ai-interviewer%20for%20candidate.png)
-
-### AI-Powered Coding Assessment
-![AI powered coding assessment](Images/Ai%20powered%20coding%20assesment.png)
-
-### Candidate Project & Code AI Analysis
-![Candidate project code AI analysis](Images/candidate%20project%20code%20AI%20analysis.png)
-
 ## How It Works
 
 1. A recruiter signs in to the protected workspace and creates or selects a candidate.
@@ -199,10 +173,11 @@ npm run check
 npm ci
 npm audit --omit=dev
 npm run lint
+npm test
 npm run build
 ```
 
-Regression tests cover authentication/token primitives, production session-state rules, and CSV-export safety cases.
+Regression tests cover authentication/token primitives, production session-state rules, CSV-export safety, API security headers, CORS rejection, request-size enforcement, health/not-found behavior, graceful shutdown, and fail-closed production startup.
 
 ## Deployment
 

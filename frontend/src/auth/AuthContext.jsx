@@ -1,19 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import config from '../config'
+import { buildRequestHeaders, parseResponse } from './http'
 
 const TOKEN_KEY = 'ai_interviewer_platform_token'
 const AuthContext = createContext(null)
-
-async function parseResponse(response) {
-  const data = await response.json().catch(() => ({ success: false, error: 'Invalid server response' }))
-  if (!response.ok) {
-    const error = new Error(data.error || data.message || `Request failed (${response.status})`)
-    error.status = response.status
-    error.requestId = data.requestId || response.headers.get('x-request-id')
-    throw error
-  }
-  return data
-}
 
 export function AuthProvider({ children }) {
   const [token, setToken] = useState(() => sessionStorage.getItem(TOKEN_KEY) || '')
@@ -28,11 +18,7 @@ export function AuthProvider({ children }) {
   }, [])
 
   const apiFetch = useCallback(async (path, options = {}) => {
-    const headers = new Headers(options.headers || {})
-    if (token) headers.set('Authorization', `Bearer ${token}`)
-    if (options.body && !headers.has('Content-Type') && !(options.body instanceof FormData)) {
-      headers.set('Content-Type', 'application/json')
-    }
+    const headers = buildRequestHeaders({ headers: options.headers, token, body: options.body })
 
     const response = await fetch(`${config.AI_BACKEND_URL}${path}`, { ...options, headers })
     try {

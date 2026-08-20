@@ -47,4 +47,5 @@ jobs:
       - name: Audit production dependencies
         run: npm audit --omit=dev
       - run: npm run lint
+      - run: npm test
       - run: npm run build
