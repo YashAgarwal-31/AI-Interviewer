@@ -222,7 +222,7 @@ The repository includes:
 - backend/frontend `.env.example` files
 - [`DEPLOYMENT.md`](./DEPLOYMENT.md) — production environment setup, launch order, browser/device checks, and live smoke-test checklist
 
-This build is intended for **one recruiting organization on one normal backend service with concurrent recruiters and candidates**. Before turning it into a public multi-company or multi-region SaaS, add organization-level tenant isolation, shared rate-limit/coordination infrastructure such as Redis, distributed idempotency/locking, and dedicated load testing.
+
 
 ## Security Notes
 
@@ -232,6 +232,6 @@ This build is intended for **one recruiting organization on one normal backend s
 - Candidate IDs are identifiers, not authentication credentials.
 - Enable MongoDB backups and hosting/provider monitoring before real production usage.
 
----
 
-Built as a full-stack AI engineering project focused on secure interview workflows, practical recruiting operations, and production-oriented system design.
+
+
