@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { hashPassword, normalizeEmail, validatePassword, verifyPassword } from '../utils/auth.js';
+import { buildAccessUrl } from '../routes/sessions.js';
 import { generateAccessToken, hashAccessToken, safeEqual, verifyAccessToken } from '../utils/security.js';
 
 test('password policy rejects weak credentials', () => {
@@ -35,4 +36,18 @@ test('interview access tokens are random and verify only against their hash', ()
   assert.equal(verifyAccessToken(record, second), false);
   assert.equal(safeEqual('same-value', 'same-value'), true);
   assert.equal(safeEqual('same-value', 'different'), false);
+});
+
+test('interview invite URLs keep the access token out of the query string', () => {
+  const accessToken = 'sensitive-interview-token';
+  const url = new URL(buildAccessUrl({
+    candidateId: 'candidate-1',
+    sessionId: 'session-1',
+    accessToken
+  }));
+
+  assert.equal(url.searchParams.get('candidateId'), 'candidate-1');
+  assert.equal(url.searchParams.get('sessionId'), 'session-1');
+  assert.equal(url.searchParams.has('accessToken'), false);
+  assert.equal(new URLSearchParams(url.hash.slice(1)).get('accessToken'), accessToken);
 });

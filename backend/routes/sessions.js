@@ -38,13 +38,15 @@ const frontendBaseUrl = () => (
   process.env.PRODUCTION_FRONTEND_URL || process.env.FRONTEND_URL || 'http://localhost:5173'
 ).replace(/\/$/, '');
 
-const buildAccessUrl = ({ candidateId, sessionId, accessToken }) => {
+export const buildAccessUrl = ({ candidateId, sessionId, accessToken }) => {
   const params = new URLSearchParams({
     candidateId: String(candidateId),
-    sessionId: String(sessionId),
-    accessToken: String(accessToken)
+    sessionId: String(sessionId)
   });
-  return `${frontendBaseUrl()}/?${params.toString()}`;
+  // URL fragments stay in the browser and are not sent to HTTP servers,
+  // reverse-proxy logs, or Referer headers.
+  const fragment = new URLSearchParams({ accessToken: String(accessToken) });
+  return `${frontendBaseUrl()}/?${params.toString()}#${fragment.toString()}`;
 };
 
 function defaultQuestions() {

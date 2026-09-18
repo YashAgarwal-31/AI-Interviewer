@@ -162,6 +162,19 @@ router.post('/complete', async (req, res) => {
         const session = await getScheduledSessionById(sessionId);
         if (!session) return res.status(404).json({ success: false, error: 'Session not found' });
         if (!verifyScheduledAccessToken(session, accessToken)) return res.status(401).json({ success: false, error: 'Invalid interview access token' });
+        if (session.status === 'completed') {
+            return res.json({ success: true, alreadyCompleted: true, message: 'Session was already completed', session: publicSession(session) });
+        }
+
+        const validation = validateSessionTiming(session);
+        if (!validation.isValid) {
+            if (validation.shouldExpire) await updateSessionStatus(session.sessionId, 'expired');
+            return res.status(403).json({ success: false, error: validation.reason || 'Session is not active' });
+        }
+        if (session.status !== 'active') {
+            return res.status(409).json({ success: false, error: 'Session must be active before it can be completed' });
+        }
+
         const completed = await completeSession(sessionId, completionData || {});
         return res.json({ success: true, message: 'Session completed successfully', session: publicSession(completed) });
     } catch (error) {
