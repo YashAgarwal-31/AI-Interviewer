@@ -3,7 +3,7 @@ import InterviewSession from '../models/InterviewSession.js';
 import { verifyAccessToken } from '../utils/security.js';
 import {
   getScheduledSessionById,
-  patchScheduledSession,
+  patchScheduledInterviewState,
   updateSessionStatus,
   validateSessionTiming,
   verifyScheduledAccessToken
@@ -112,8 +112,8 @@ function buildSystemPrompt(profile, questions, tasks, allowCoding) {
 
 async function persistData(context, interviewData) {
   if (context.type === 'scheduled') {
-    await patchScheduledSession(context.session.sessionId, { interviewData });
-    context.session.interviewData = interviewData;
+    const updated = await patchScheduledInterviewState(context.session.sessionId, interviewData);
+    context.session.interviewData = updated?.interviewData || interviewData;
     return;
   }
   context.session.interviewData = interviewData;
