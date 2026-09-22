@@ -20,13 +20,13 @@ services:
         sync: false
       - key: AUTH_SESSION_HOURS
         value: "12"
-      - key: OPENAI_API_KEY
+      - key: GEMINI_API_KEY
         sync: false
-      - key: OPENAI_INTERVIEW_MODEL
-        value: gpt-4.1-mini
-      - key: OPENAI_TIMEOUT_MS
+      - key: GEMINI_INTERVIEW_MODEL
+        value: gemini-3.8-flash
+      - key: GEMINI_TIMEOUT_MS
         value: "45000"
-      - key: OPENAI_MAX_RETRIES
+      - key: GEMINI_MAX_RETRIES
         value: "2"
       - key: RESEND_API_KEY
         sync: false

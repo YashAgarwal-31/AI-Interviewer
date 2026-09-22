@@ -23,15 +23,15 @@ import {
 
 const router = express.Router();
 
-let openai = null;
+let gemini = null;
 let candidatesCollection = null;
 let codeQuestionsCollection = null;
 const demoSessions = new Map();
 
-export function initializeSessionRoutes(collections = {}, openaiInstance = null) {
+export function initializeSessionRoutes(collections = {}, geminiInstance = null) {
   candidatesCollection = collections.candidatesCollection || null;
   codeQuestionsCollection = collections.codeQuestionsCollection || null;
-  openai = openaiInstance;
+  gemini = geminiInstance;
 }
 
 const frontendBaseUrl = () => (
@@ -92,26 +92,16 @@ async function generateQuestions(profile) {
   if (Array.isArray(profile?.customQuestions) && profile.customQuestions.length) {
     return profile.customQuestions.slice(0, 12);
   }
-  if (!openai) return defaultQuestions();
+  if (!gemini) return defaultQuestions();
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_INTERVIEW_MODEL || 'gpt-4.1-mini',
-      messages: [
-        {
-          role: 'system',
-          content: 'You write concise, practical technical interview questions. Return only a JSON array of strings.'
-        },
-        {
-          role: 'user',
-          content: `Create 6-10 interview questions for this candidate. Include project depth, fundamentals, one architecture question, and one coding-oriented question.\n\nName: ${profile?.candidateName || 'Candidate'}\nRole: ${profile?.position || profile?.role || 'Software Developer'}\nSkills: ${Array.isArray(profile?.skills) ? profile.skills.join(', ') : (profile?.skills || 'Not provided')}\nExperience: ${profile?.experience || 'Not provided'}\nProjects: ${profile?.projectDetails || profile?.githubProjects || 'Not provided'}`
-        }
-      ],
+    const raw = await gemini.generateText({
+      systemInstruction: 'You write concise, practical technical interview questions.',
+      input: `Create 6-10 interview questions for this candidate. Include project depth, fundamentals, one architecture question, and one coding-oriented question.\n\nName: ${profile?.candidateName || 'Candidate'}\nRole: ${profile?.position || profile?.role || 'Software Developer'}\nSkills: ${Array.isArray(profile?.skills) ? profile.skills.join(', ') : (profile?.skills || 'Not provided')}\nExperience: ${profile?.experience || 'Not provided'}\nProjects: ${profile?.projectDetails || profile?.githubProjects || 'Not provided'}`,
       temperature: 0.4,
-      max_tokens: 900
+      maxOutputTokens: 900,
+      responseSchema: { type: 'array', items: { type: 'string' }, minItems: 6, maxItems: 10 }
     });
-
-    const raw = completion.choices?.[0]?.message?.content?.trim() || '';
     const cleaned = raw.replace(/```json\n?/gi, '').replace(/```/g, '').trim();
     const parsed = JSON.parse(cleaned);
     if (Array.isArray(parsed) && parsed.length) {
@@ -151,24 +141,31 @@ async function loadOrGenerateCodingTasks(candidateId, profile) {
   }
 
   let tasks = null;
-  if (openai) {
+  if (gemini) {
     try {
-      const completion = await openai.chat.completions.create({
-        model: process.env.OPENAI_INTERVIEW_MODEL || 'gpt-4.1-mini',
-        messages: [
-          {
-            role: 'system',
-            content: 'Write practical coding interview exercises. Return only valid JSON.'
-          },
-          {
-            role: 'user',
-            content: `Return a JSON array with 1-2 coding tasks. Each object must contain id, title, description, languageHints (array), exampleInputOutput (optional), and tests (array of strings).\n\nRole: ${profile?.position || profile?.role || 'Software Developer'}\nSkills: ${Array.isArray(profile?.skills) ? profile.skills.join(', ') : (profile?.skills || 'Not provided')}\nExperience: ${profile?.experience || 'Not provided'}`
-          }
-        ],
+      const raw = await gemini.generateText({
+        systemInstruction: 'Write practical coding interview exercises.',
+        input: `Create 1-2 coding tasks for this candidate.\n\nRole: ${profile?.position || profile?.role || 'Software Developer'}\nSkills: ${Array.isArray(profile?.skills) ? profile.skills.join(', ') : (profile?.skills || 'Not provided')}\nExperience: ${profile?.experience || 'Not provided'}`,
         temperature: 0.4,
-        max_tokens: 1000
+        maxOutputTokens: 1000,
+        responseSchema: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 2,
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              title: { type: 'string' },
+              description: { type: 'string' },
+              languageHints: { type: 'array', items: { type: 'string' } },
+              tests: { type: 'array', items: { type: 'string' } }
+            },
+            required: ['id', 'title', 'description', 'languageHints', 'tests'],
+            additionalProperties: false
+          }
+        }
       });
-      const raw = completion.choices?.[0]?.message?.content?.trim() || '';
       const parsed = JSON.parse(raw.replace(/```json\n?/gi, '').replace(/```/g, '').trim());
       if (Array.isArray(parsed) && parsed.length) tasks = parsed.slice(0, 3);
     } catch (error) {

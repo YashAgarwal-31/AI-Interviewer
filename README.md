@@ -4,7 +4,7 @@
 ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=000)
 ![Node.js](https://img.shields.io/badge/Node.js-20-339933?logo=node.js&logoColor=fff)
 ![MongoDB](https://img.shields.io/badge/MongoDB-Mongoose-47A248?logo=mongodb&logoColor=fff)
-![OpenAI](https://img.shields.io/badge/OpenAI-API-412991?logo=openai&logoColor=fff)
+![Google Gemini](https://img.shields.io/badge/Google Gemini-API-412991?logo=googlegemini&logoColor=fff)
 
 InterviewBuddy is a full-stack AI-powered technical interviewing and recruitment platform. It enables recruiting teams to manage candidates, schedule secure interviews, conduct adaptive AI-driven technical assessments with voice and coding support, and review structured interview reports from a centralized recruiter workspace.
 
@@ -63,7 +63,7 @@ flowchart LR
     C[Candidate] --> FE
     FE --> API[Node.js + Express API]
     API --> DB[(MongoDB)]
-    API --> AI[OpenAI API]
+    API --> AI[Google Gemini API]
     API --> EMAIL[Resend - Optional]
     FE --> ML[MediaPipe + TensorFlow.js]
     FE --> EDITOR[External Code Editor / Built-in Fallback]
@@ -73,7 +73,7 @@ flowchart LR
 
 - **Frontend:** React 19, Vite 7, React Router 7, Tailwind CSS
 - **Backend:** Node.js 20.19+, Express, MongoDB/Mongoose
-- **AI:** OpenAI API for interview conversation and technical evaluation
+- **AI:** Google Gemini API for interview conversation and technical evaluation
 - **Monitoring:** MediaPipe + TensorFlow.js/COCO-SSD in the candidate browser
 - **Email:** Resend (optional)
 - **Deployment:** Vercel frontend + Render backend + MongoDB
@@ -104,7 +104,7 @@ flowchart LR
 
 ### Results and evaluation
 - Persisted interview report with transcript, duration, question/answer counts, and coding-submission count
-- OpenAI-generated technical score, recommendation, summary, strengths, and concerns
+- Google Gemini-generated technical score, recommendation, summary, strengths, and concerns
 - Evaluation instructions treat candidate transcript as untrusted data and exclude protected-trait/personality judgments
 - Browser integrity signals are stored separately as recruiter review aids and are not included in the AI technical score
 - Retry-safe completion returns an existing persisted report instead of intentionally creating duplicates
@@ -117,7 +117,7 @@ flowchart LR
 - Candidate invite-token hashes stored instead of plaintext
 - Invite/reminder credential rotation with rollback on failed email delivery
 - Token rotation blocked after an interview has started
-- MongoDB connection pooling/indexes, OpenAI timeout/retries, health checks, and graceful shutdown
+- MongoDB connection pooling/indexes, Google Gemini timeout/retries, health checks, and graceful shutdown
 - Legacy credential-issuing session creation disabled in production
 
 ## Tech Stack
@@ -126,7 +126,7 @@ flowchart LR
 |---|---|
 | Frontend | React 19, Vite 7, React Router 7, Tailwind CSS, Lucide React |
 | Backend | Node.js, Express.js, MongoDB, Mongoose |
-| AI | OpenAI API |
+| AI | Google Gemini API (Interactions API) |
 | Browser AI / Monitoring | MediaPipe, TensorFlow.js, COCO-SSD |
 | Auth & Security | Node Crypto, scrypt, hashed bearer sessions, RBAC |
 | Optional Email | Resend |
@@ -180,11 +180,13 @@ Production startup requires:
 ```text
 MONGO_URI
 ADMIN_API_KEY
-OPENAI_API_KEY
+GEMINI_API_KEY
 FRONTEND_URL or PRODUCTION_FRONTEND_URL/CORS_ORIGINS
 ```
 
-OpenAI is optional only for local development fallback behavior. Production intentionally fails closed without `OPENAI_API_KEY` so the advertised AI interview/evaluation functionality is available.
+Google Gemini is optional only for local development fallback behavior. Production intentionally fails closed without `GEMINI_API_KEY` so the advertised AI interview/evaluation functionality is available.
+
+Create the key in [Google AI Studio](https://aistudio.google.com/apikey), then set `GEMINI_API_KEY`. The default model is `gemini-3.8-flash`; override it with `GEMINI_INTERVIEW_MODEL`. The backend uses the stateless Gemini Interactions REST API and does not expose the key to the browser.
 
 Resend is optional. Configure `RESEND_API_KEY` and `FROM_EMAIL` only when email invitations/reminders are needed.
 
@@ -277,5 +279,5 @@ The current automated quality gate covers:
 - **Security:** Production dependency audits for backend and frontend
 - **Quality:** Backend syntax checks, frontend ESLint, and frontend production build
 
-Live OpenAI responses, Resend delivery, camera/microphone permissions, speech recognition, MediaPipe model delivery, and the external coding editor still require their respective credentials, providers, network access, and a supported browser/device. Follow the live smoke-test checklist in [DEPLOYMENT.md](./DEPLOYMENT.md) before inviting real candidates.
+Live Google Gemini responses, Resend delivery, camera/microphone permissions, speech recognition, MediaPipe model delivery, and the external coding editor still require their respective credentials, providers, network access, and a supported browser/device. Follow the live smoke-test checklist in [DEPLOYMENT.md](./DEPLOYMENT.md) before inviting real candidates.
 

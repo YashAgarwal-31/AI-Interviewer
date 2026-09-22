@@ -12,12 +12,12 @@ import {
 const router = express.Router();
 let candidatesCollection = null;
 let codeQuestionsCollection = null;
-let openai = null;
+let gemini = null;
 
-export function initializeLiveInterviewRoutes(collections = {}, openaiInstance = null) {
+export function initializeLiveInterviewRoutes(collections = {}, geminiInstance = null) {
   candidatesCollection = collections.candidatesCollection || null;
   codeQuestionsCollection = collections.codeQuestionsCollection || null;
-  openai = openaiInstance;
+  gemini = geminiInstance;
 }
 
 function scheduledProfile(session) {
@@ -209,22 +209,20 @@ async function prepareInterview(context) {
 
 async function interviewerResponse(interviewData, mode) {
   const history = sanitizedHistory(interviewData.conversationHistory);
-  if (!openai) {
+  if (!gemini) {
     if (mode === 'code_result') return 'Thanks. Briefly explain the time and space complexity of your solution and one edge case you considered.';
     const index = Math.min(Number(interviewData.metadata?.questionsAsked || 1), interviewData.interviewQuestions.length - 1);
     return interviewData.interviewQuestions[index] || 'What trade-off would you reconsider if you had to scale this solution significantly?';
   }
 
-  const completion = await openai.chat.completions.create({
-    model: process.env.OPENAI_INTERVIEW_MODEL || 'gpt-4.1-mini',
+  const transcript = history.map(item => `${item.role === 'assistant' ? 'Interviewer' : 'Candidate'}: ${item.content}`).join('\n\n');
+  const response = await gemini.generateText({
+    systemInstruction: interviewData.systemPrompt,
+    input: `Continue the interview from this transcript. Ask exactly one concise next question.\n\n${transcript}`,
     temperature: 0.35,
-    max_tokens: 350,
-    messages: [
-      { role: 'system', content: interviewData.systemPrompt },
-      ...history.map(item => ({ role: item.role, content: item.content }))
-    ]
+    maxOutputTokens: 350
   });
-  return completion.choices?.[0]?.message?.content?.trim() || 'Could you explain your reasoning in a little more technical detail?';
+  return response || 'Could you explain your reasoning in a little more technical detail?';
 }
 
 router.post('/initialize-interview/:sessionId', async (req, res) => {

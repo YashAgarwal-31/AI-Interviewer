@@ -2,7 +2,7 @@
 
 InterviewBuddy is configured for a **Render backend + Vercel frontend + MongoDB** single-workspace production deployment.
 
-The repository can pass all static/build/security gates without proving that your real Render, Vercel, MongoDB, OpenAI, Resend, browser camera/microphone, and external editor accounts are configured correctly. Complete the live smoke test below before sending invitations to real candidates.
+The repository can pass all static/build/security gates without proving that your real Render, Vercel, MongoDB, Gemini, Resend, browser camera/microphone, and external editor accounts are configured correctly. Complete the live smoke test below before sending invitations to real candidates.
 
 ## 1. Required services
 
@@ -11,7 +11,7 @@ Required for the advertised production experience:
 - MongoDB Atlas (or another reachable MongoDB)
 - Render
 - Vercel
-- OpenAI API key
+- Gemini API key
 
 Optional:
 - Resend, only when email invitations/reminders are required
@@ -33,10 +33,10 @@ MONGO_DB_NAME=ai_interviewer
 MONGO_MAX_POOL_SIZE=20
 ADMIN_API_KEY=...
 AUTH_SESSION_HOURS=12
-OPENAI_API_KEY=...
-OPENAI_INTERVIEW_MODEL=gpt-4.1-mini
-OPENAI_TIMEOUT_MS=45000
-OPENAI_MAX_RETRIES=2
+GEMINI_API_KEY=...
+GEMINI_INTERVIEW_MODEL=gemini-3.8-flash
+GEMINI_TIMEOUT_MS=45000
+GEMINI_MAX_RETRIES=2
 FRONTEND_URL=https://<your-vercel-domain>
 PRODUCTION_FRONTEND_URL=https://<your-vercel-domain>
 ENABLE_DEMO_MODE=false
@@ -51,7 +51,9 @@ FROM_EMAIL=Interviews <interviews@your-domain.com>
 
 `CORS_ORIGINS` may contain extra exact origins separated by commas.
 
-**Production intentionally refuses to start without MongoDB, `ADMIN_API_KEY`, OpenAI, and an allowed frontend origin.**
+**Production intentionally refuses to start without MongoDB, `ADMIN_API_KEY`, `GEMINI_API_KEY` (or `GOOGLE_API_KEY`), and an allowed frontend origin.**
+
+Create the Gemini key in [Google AI Studio](https://aistudio.google.com/apikey). Keep it server-side; never add it to Vite/frontend environment variables.
 
 ## 3. Deploy backend on Render
 
@@ -63,7 +65,7 @@ After deployment, verify:
 GET https://<render-service>/api/health
 ```
 
-Expected: HTTP 200 with Mongo connected and OpenAI configured.
+Expected: HTTP 200 with Mongo connected and Gemini configured.
 
 ## 4. Deploy frontend on Vercel
 
@@ -182,7 +184,7 @@ Browser speech recognition is capability-dependent; typed answers remain the req
 For real usage:
 - enable MongoDB backups
 - enable Render/Vercel logs and uptime alerts
-- monitor OpenAI errors/rate limits/costs
+- monitor Gemini errors/rate limits/costs
 - monitor Resend delivery failures if email is enabled
 - review audit logs after the first interview batches
 
