@@ -37,10 +37,11 @@ function waitForOutput(child, pattern, timeoutMs = 20_000) {
   });
 }
 
-async function request(baseUrl, path, { method = 'GET', token = '', interviewToken = '', body } = {}) {
+async function request(baseUrl, path, { method = 'GET', token = '', interviewToken = '', adminKey = '', body } = {}) {
   const headers = {};
   if (token) headers.authorization = `Bearer ${token}`;
   if (interviewToken) headers['x-interview-token'] = interviewToken;
+  if (adminKey) headers['x-admin-key'] = adminKey;
   if (body !== undefined) headers['content-type'] = 'application/json';
   const response = await fetch(`${baseUrl}${path}`, {
     method,
@@ -81,28 +82,13 @@ test('real MongoDB recruiter-to-result interview flow preserves concurrent activ
 
     const owner = await request(baseUrl, '/api/auth/bootstrap', {
       method: 'POST',
+      adminKey: 'integration-admin-key',
       body: {
         name: 'Integration Owner',
         email: 'owner@example.com',
         password: 'StrongPassword123',
         organizationName: 'InterviewBuddy'
-      },
-      interviewToken: ''
-    }).catch(async error => {
-      // Bootstrap requires its separate server-admin header.
-      const response = await fetch(`${baseUrl}/api/auth/bootstrap`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-admin-key': 'integration-admin-key' },
-        body: JSON.stringify({
-          name: 'Integration Owner',
-          email: 'owner@example.com',
-          password: 'StrongPassword123',
-          organizationName: 'InterviewBuddy'
-        })
-      });
-      const data = await response.json();
-      assert.ok(response.ok, error.message + ' / ' + JSON.stringify(data));
-      return data;
+      }
     });
 
     const recruiterToken = owner.token;
