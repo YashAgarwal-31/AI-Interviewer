@@ -3,7 +3,6 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import express from 'express';
 import mongoose from 'mongoose';
-import OpenAI from 'openai';
 import AuditLog from './models/AuditLog.js';
 import AuthSession from './models/AuthSession.js';
 import User from './models/User.js';
@@ -20,6 +19,7 @@ import scheduledSessionsRoutes from './routes/scheduledSessions.js';
 import sessionRoutes, { initializeSessionRoutes } from './routes/sessions.js';
 import { logAudit } from './utils/auth.js';
 import emailService from './utils/emailService.js';
+import { createGeminiClient } from './utils/geminiClient.js';
 import { requireAdmin } from './utils/security.js';
 import { initializeSessionActionGuard, requireLiveInterviewAction } from './utils/sessionActionGuard.js';
 import { initializeScheduledSessions } from './utils/sessionScheduler.js';
@@ -44,8 +44,9 @@ app.disable('x-powered-by');
 
 function validateProductionConfig() {
   if (!isProduction) return;
-  const required = ['ADMIN_API_KEY', 'OPENAI_API_KEY'];
+  const required = ['ADMIN_API_KEY'];
   const missing = required.filter(key => !process.env[key]);
+  if (!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY)) missing.push('GEMINI_API_KEY');
   if (!(process.env.MONGO_URI || process.env.MONGODB_URI)) missing.push('MONGO_URI');
   if (!(process.env.FRONTEND_URL || process.env.PRODUCTION_FRONTEND_URL || process.env.CORS_ORIGINS)) missing.push('FRONTEND_URL');
   if (missing.length) throw new Error(`Missing required production configuration: ${missing.join(', ')}`);
@@ -152,17 +153,21 @@ async function connectDatabase() {
   mongoError = null;
 }
 
-function createOpenAIClient() {
-  if (!process.env.OPENAI_API_KEY) { console.warn('OPENAI_API_KEY is not configured. Interview questions will use local fallbacks.'); return null; }
-  try { return new OpenAI({ apiKey: process.env.OPENAI_API_KEY, timeout: Math.max(5000, Number(process.env.OPENAI_TIMEOUT_MS) || 45000), maxRetries: Math.min(5, Math.max(0, Number(process.env.OPENAI_MAX_RETRIES) || 2)) }); }
-  catch (error) { console.error('OpenAI client initialization failed:', error); return null; }
+function initializeGeminiClient() {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!apiKey) {
+    console.warn('GEMINI_API_KEY is not configured. Interview questions will use local fallbacks.');
+    return null;
+  }
+  try { return createGeminiClient({ apiKey }); }
+  catch (error) { console.error('Gemini client initialization failed:', error); return null; }
 }
 
-function initializeRoutes(openai) {
+function initializeRoutes(gemini) {
   const collections = { candidatesCollection, codeQuestionsCollection, interviewResultsCollection, scheduledSessionsCollection };
-  initializeSessionRoutes(collections, openai);
-  initializeLiveInterviewRoutes(collections, openai);
-  initializeLiveCompletionRoutes(collections, openai);
+  initializeSessionRoutes(collections, gemini);
+  initializeLiveInterviewRoutes(collections, gemini);
+  initializeLiveCompletionRoutes(collections, gemini);
   initializeCandidateRoutes(collections);
   initializeResultRoutes(collections);
   initializePlatformRoutes(collections);
@@ -193,7 +198,7 @@ function initializeRoutes(openai) {
 
 app.get('/api/health', (req, res) => {
   const healthy = !isProduction || mongoConnected;
-  return res.status(healthy ? 200 : 503).json({ success: healthy, status: healthy ? 'ok' : 'degraded', service: 'ai-interviewer-backend', mongoConnected, openaiConfigured: Boolean(process.env.OPENAI_API_KEY), emailConfigured: emailService.isConfigured(), version: process.env.RENDER_GIT_COMMIT?.slice(0, 12) || process.env.APP_VERSION || null, uptimeSeconds: Math.round(process.uptime()), timestamp: new Date().toISOString() });
+  return res.status(healthy ? 200 : 503).json({ success: healthy, status: healthy ? 'ok' : 'degraded', service: 'ai-interviewer-backend', mongoConnected, geminiConfigured: Boolean(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY), emailConfigured: emailService.isConfigured(), version: process.env.RENDER_GIT_COMMIT?.slice(0, 12) || process.env.APP_VERSION || null, uptimeSeconds: Math.round(process.uptime()), timestamp: new Date().toISOString() });
 });
 
 app.get('/api/db-health', requireAdmin, (req, res) => res.status(mongoConnected ? 200 : 503).json({ success: mongoConnected, mongo: { configured: Boolean(process.env.MONGO_URI || process.env.MONGODB_URI), connected: mongoConnected, error: mongoError ? mongoError.message : null } }));
@@ -201,9 +206,9 @@ app.get('/api/db-health', requireAdmin, (req, res) => res.status(mongoConnected 
 async function startServer() {
   try { validateProductionConfig(); await connectDatabase(); }
   catch (error) { mongoConnected = false; mongoError = error; console.error('Server initialization failed:', error.message); if (isProduction) { process.exitCode = 1; return; } }
-  const openai = createOpenAIClient();
+  const gemini = initializeGeminiClient();
   app.locals.platformHealth = { mongoConnected, emailConfigured: emailService.isConfigured() };
-  initializeRoutes(openai);
+  initializeRoutes(gemini);
   app.use((req, res) => res.status(404).json({ success: false, error: 'API route not found', requestId: req.requestId }));
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);

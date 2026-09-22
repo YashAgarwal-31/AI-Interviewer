@@ -57,7 +57,7 @@ test('backend serves health, security, CORS, payload, and not-found behavior', {
       PORT: String(port),
       MONGO_URI: '',
       MONGODB_URI: '',
-      OPENAI_API_KEY: '',
+      GEMINI_API_KEY: '',
       ADMIN_API_KEY: '',
       FRONTEND_URL: ''
     },
@@ -107,7 +107,7 @@ test('production startup fails closed when required configuration is absent', { 
       PORT: '0',
       MONGO_URI: '',
       MONGODB_URI: '',
-      OPENAI_API_KEY: '',
+      GEMINI_API_KEY: '',
       ADMIN_API_KEY: '',
       FRONTEND_URL: '',
       PRODUCTION_FRONTEND_URL: '',
@@ -122,7 +122,7 @@ test('production startup fails closed when required configuration is absent', { 
   assert.equal(code, 1);
   assert.match(output, /missing required production configuration/i);
   assert.match(output, /ADMIN_API_KEY/);
-  assert.match(output, /OPENAI_API_KEY/);
+  assert.match(output, /GEMINI_API_KEY/);
   assert.match(output, /MONGO_URI/);
   assert.match(output, /FRONTEND_URL/);
 });

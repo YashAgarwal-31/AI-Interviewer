@@ -68,7 +68,7 @@ test('real MongoDB recruiter-to-result interview flow preserves concurrent activ
       MONGO_URI: integrationUri,
       MONGO_DB_NAME: databaseName,
       ADMIN_API_KEY: 'integration-admin-key',
-      OPENAI_API_KEY: '',
+      GEMINI_API_KEY: '',
       FRONTEND_URL: 'http://localhost:5173',
       ENABLE_DEMO_MODE: 'false'
     },
