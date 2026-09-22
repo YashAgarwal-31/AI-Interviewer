@@ -256,20 +256,30 @@ export async function patchScheduledSession(sessionId, patch = {}) {
 export async function patchScheduledInterviewState(sessionId, interviewData = {}) {
     requireCollection();
     const state = interviewData && typeof interviewData === 'object' ? interviewData : {};
-    const fields = {
-        'interviewData.candidateProfile': state.candidateProfile || null,
-        'interviewData.interviewQuestions': Array.isArray(state.interviewQuestions) ? state.interviewQuestions : [],
-        'interviewData.codingTasks': Array.isArray(state.codingTasks) ? state.codingTasks : [],
-        'interviewData.allowCodeEditor': state.allowCodeEditor !== false,
-        'interviewData.systemPrompt': String(state.systemPrompt || ''),
-        'interviewData.conversationHistory': Array.isArray(state.conversationHistory) ? state.conversationHistory : [],
-        'interviewData.metadata': state.metadata && typeof state.metadata === 'object' ? state.metadata : {},
-        updatedAt: new Date()
+    const nextState = {
+        candidateProfile: state.candidateProfile || null,
+        interviewQuestions: Array.isArray(state.interviewQuestions) ? state.interviewQuestions : [],
+        codingTasks: Array.isArray(state.codingTasks) ? state.codingTasks : [],
+        allowCodeEditor: state.allowCodeEditor !== false,
+        systemPrompt: String(state.systemPrompt || ''),
+        conversationHistory: Array.isArray(state.conversationHistory) ? state.conversationHistory : [],
+        metadata: state.metadata && typeof state.metadata === 'object' ? state.metadata : {}
     };
+    const now = new Date();
 
     return scheduledSessionsCollection.findOneAndUpdate(
         { sessionId: String(sessionId) },
-        { $set: fields },
+        [{
+            $set: {
+                interviewData: {
+                    $mergeObjects: [
+                        { $ifNull: ['$interviewData', {}] },
+                        { $literal: nextState }
+                    ]
+                },
+                updatedAt: { $literal: now }
+            }
+        }],
         { returnDocument: 'after' }
     );
 }
