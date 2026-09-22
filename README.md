@@ -232,6 +232,50 @@ The repository includes:
 - Candidate IDs are identifiers, not authentication credentials.
 - Enable MongoDB backups and hosting/provider monitoring before real production usage.
 
+## Latest Reliability and Security Hardening
 
+The latest **main** branch includes an additional production-hardening pass focused on concurrency, data integrity, AI safety, browser security, and end-to-end verification.
 
+### Reliability improvements
+
+- Interview mutations for the same session are serialized to prevent overlapping answer, monitoring, initialization, and completion requests from corrupting state.
+- Browser integrity events are appended atomically and retained independently from transcript updates.
+- Interview state updates preserve concurrently received monitoring signals.
+- Interview results enforce a unique **sessionId**, preventing duplicate result records.
+- Completion is retry-safe and recovers the session state when a result was stored before finalization completed.
+- Resend configuration is loaded lazily, so values supplied through the local backend environment file are available after dotenv initialization.
+
+### AI and application security
+
+- Candidate profile, resume, project, custom-question, and coding-task content is explicitly isolated as untrusted reference data in the AI prompt.
+- Candidate-controlled prompt delimiters are escaped before they reach the model.
+- AI evaluation requests use structured JSON output and retain safe fallback behavior when evaluation is unavailable.
+- External coding-editor messages must match both the configured origin and the exact iframe window.
+- Editor payloads are normalized and bounded before submission.
+- The frontend deployment configuration includes Content Security Policy, cross-origin isolation, referrer, permissions, framing, and content-type protections.
+- The built-in coding area is accurately described as a code-submission path for AI/recruiter review; code execution remains the responsibility of the configured external editor.
+
+### Expanded automated verification
+
+The CI workflow now starts a real MongoDB 7 service and tests the complete core journey:
+
+1. Bootstrap the first platform owner.
+2. Create a candidate.
+3. Schedule a secure interview.
+4. Validate the signed candidate invitation.
+5. Initialize the live interview.
+6. Persist a candidate answer and monitoring signal submitted concurrently.
+7. Complete the interview and retrieve its report.
+8. Retry completion safely.
+9. Confirm that only one result exists for the session.
+
+The current automated quality gate covers:
+
+- **Backend:** 21 tests
+- **Frontend:** 10 tests
+- **Database integration:** Real MongoDB-backed recruiter-to-result flow
+- **Security:** Production dependency audits for backend and frontend
+- **Quality:** Backend syntax checks, frontend ESLint, and frontend production build
+
+Live OpenAI responses, Resend delivery, camera/microphone permissions, speech recognition, MediaPipe model delivery, and the external coding editor still require their respective credentials, providers, network access, and a supported browser/device. Follow the live smoke-test checklist in [DEPLOYMENT.md](./DEPLOYMENT.md) before inviting real candidates.
 
