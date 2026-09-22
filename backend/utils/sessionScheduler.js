@@ -253,6 +253,52 @@ export async function patchScheduledSession(sessionId, patch = {}) {
     return result || null;
 }
 
+export async function patchScheduledInterviewState(sessionId, interviewData = {}) {
+    requireCollection();
+    const state = interviewData && typeof interviewData === 'object' ? interviewData : {};
+    const fields = {
+        'interviewData.candidateProfile': state.candidateProfile || null,
+        'interviewData.interviewQuestions': Array.isArray(state.interviewQuestions) ? state.interviewQuestions : [],
+        'interviewData.codingTasks': Array.isArray(state.codingTasks) ? state.codingTasks : [],
+        'interviewData.allowCodeEditor': state.allowCodeEditor !== false,
+        'interviewData.systemPrompt': String(state.systemPrompt || ''),
+        'interviewData.conversationHistory': Array.isArray(state.conversationHistory) ? state.conversationHistory : [],
+        'interviewData.metadata': state.metadata && typeof state.metadata === 'object' ? state.metadata : {},
+        updatedAt: new Date()
+    };
+
+    return scheduledSessionsCollection.findOneAndUpdate(
+        { sessionId: String(sessionId) },
+        { $set: fields },
+        { returnDocument: 'after' }
+    );
+}
+
+export async function appendScheduledIntegrityEvent(sessionId, event, maxEvents = 200) {
+    requireCollection();
+    const limit = Math.min(500, Math.max(1, Number(maxEvents) || 200));
+    const now = new Date();
+
+    return scheduledSessionsCollection.findOneAndUpdate(
+        { sessionId: String(sessionId) },
+        [
+            { $set: { interviewData: { $ifNull: ['$interviewData', {}] } } },
+            {
+                $set: {
+                    'interviewData.integrityEvents': {
+                        $slice: [
+                            { $concatArrays: [{ $ifNull: ['$interviewData.integrityEvents', []] }, [event]] },
+                            -limit
+                        ]
+                    },
+                    updatedAt: now
+                }
+            }
+        ],
+        { returnDocument: 'after' }
+    );
+}
+
 export async function updateSessionStatus(sessionId, status, additionalData = {}) {
     requireCollection();
     if (!SESSION_STATUSES.has(status)) throw new Error(`Invalid session status: ${status}`);
