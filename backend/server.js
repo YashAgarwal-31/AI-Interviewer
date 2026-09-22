@@ -23,6 +23,7 @@ import emailService from './utils/emailService.js';
 import { requireAdmin } from './utils/security.js';
 import { initializeSessionActionGuard, requireLiveInterviewAction } from './utils/sessionActionGuard.js';
 import { initializeScheduledSessions } from './utils/sessionScheduler.js';
+import { serializeSessionMutation } from './utils/sessionMutationLock.js';
 
 dotenv.config();
 
@@ -145,7 +146,7 @@ async function connectDatabase() {
     candidatesCollection.createIndex({ candidateId: 1 }, { unique: true }),
     candidatesCollection.createIndex({ updatedAt: -1 }),
     interviewResultsCollection.createIndex({ savedAt: -1 }),
-    interviewResultsCollection.createIndex({ sessionId: 1 })
+    interviewResultsCollection.createIndex({ sessionId: 1 }, { unique: true })
   ]);
   mongoConnected = true;
   mongoError = null;
@@ -170,10 +171,10 @@ function initializeRoutes(openai) {
   app.use('/api/auth', authRoutes);
   app.use('/api/platform', platformRoutes);
   app.use('/api/sessions/integrations', integrationRoutes);
-  app.use('/api/sessions/initialize-interview/:sessionId', requireLiveInterviewAction);
-  app.use('/api/sessions/message/:sessionId', requireLiveInterviewAction);
-  app.use('/api/sessions/coding-tasks/:sessionId', requireLiveInterviewAction);
-  app.use('/api/sessions/end/:sessionId', requireLiveInterviewAction);
+  app.use('/api/sessions/initialize-interview/:sessionId', serializeSessionMutation, requireLiveInterviewAction);
+  app.use('/api/sessions/message/:sessionId', serializeSessionMutation, requireLiveInterviewAction);
+  app.use('/api/sessions/coding-tasks/:sessionId', serializeSessionMutation, requireLiveInterviewAction);
+  app.use('/api/sessions/end/:sessionId', serializeSessionMutation, requireLiveInterviewAction);
   app.use('/api/sessions', integrityEventRoutes);
   app.use('/api/sessions', liveInterviewRoutes);
   app.use('/api/sessions', liveCompletionRoutes);

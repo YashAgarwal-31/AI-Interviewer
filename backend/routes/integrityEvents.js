@@ -1,5 +1,5 @@
 import express from 'express';
-import { patchScheduledSession } from '../utils/sessionScheduler.js';
+import { appendScheduledIntegrityEvent } from '../utils/sessionScheduler.js';
 
 const router = express.Router();
 const ALLOWED_TYPES = new Set([
@@ -21,14 +21,18 @@ function cleanDetails(value) {
   return JSON.parse(serialized);
 }
 
-async function persist(context, interviewData) {
+async function persist(context, event) {
   if (context.type === 'scheduled') {
-    await patchScheduledSession(context.session.sessionId, { interviewData });
-    context.session.interviewData = interviewData;
+    const updated = await appendScheduledIntegrityEvent(context.session.sessionId, event, MAX_EVENTS);
+    context.session.interviewData = updated?.interviewData || context.session.interviewData;
     return;
   }
-  context.session.interviewData = interviewData;
-  context.session.markModified('interviewData');
+
+  const data = context.session.interviewData || {};
+  const events = Array.isArray(data.integrityEvents) ? data.integrityEvents.slice(-(MAX_EVENTS - 1)) : [];
+  events.push(event);
+  context.session.interviewData = { ...data, integrityEvents: events };
+  context.session.markModified('interviewData.integrityEvents');
   await context.session.save();
 }
 
@@ -41,18 +45,15 @@ router.post('/message/:sessionId', async (req, res, next) => {
     const type = String(incoming.type || '');
     if (!ALLOWED_TYPES.has(type)) return res.status(400).json({ success: false, error: 'Unsupported integrity event type' });
 
-    const data = context.session.interviewData || {};
-    const events = Array.isArray(data.integrityEvents) ? data.integrityEvents.slice(-(MAX_EVENTS - 1)) : [];
     const observed = new Date(incoming.observedAt);
-    events.push({
+    const event = {
       type,
       details: cleanDetails(incoming.details),
       observedAt: Number.isNaN(observed.getTime()) ? new Date().toISOString() : observed.toISOString(),
       receivedAt: new Date().toISOString(),
       source: 'candidate_browser_monitor'
-    });
-    data.integrityEvents = events;
-    await persist(context, data);
+    };
+    await persist(context, event);
     return res.json({ success: true, message: 'Integrity signal recorded' });
   } catch (error) {
     console.error('Integrity signal persistence failed:', error);

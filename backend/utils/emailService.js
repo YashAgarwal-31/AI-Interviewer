@@ -12,14 +12,25 @@ const formatDate = (value) => {
   return Number.isNaN(date.getTime()) ? 'Not specified' : date.toLocaleString();
 };
 
-class EmailService {
+export class EmailService {
   constructor() {
-    this.apiKey = process.env.RESEND_API_KEY || '';
-    this.resend = this.apiKey ? new Resend(this.apiKey) : null;
-    this.fromEmail = process.env.FROM_EMAIL || 'onboarding@resend.dev';
+    this.apiKey = '';
+    this.resend = null;
+    this.fromEmail = 'onboarding@resend.dev';
+  }
+
+  refreshConfiguration() {
+    const apiKey = process.env.RESEND_API_KEY || '';
+    const fromEmail = process.env.FROM_EMAIL || 'onboarding@resend.dev';
+    if (apiKey !== this.apiKey) {
+      this.apiKey = apiKey;
+      this.resend = apiKey ? new Resend(apiKey) : null;
+    }
+    this.fromEmail = fromEmail;
   }
 
   isConfigured() {
+    this.refreshConfiguration();
     return Boolean(this.resend && this.fromEmail);
   }
 

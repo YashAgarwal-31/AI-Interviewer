@@ -2,12 +2,7 @@ import { AlertTriangle, CheckCircle2, LockKeyhole } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import config from '../config'
-
-function inviteCredentials() {
-  const query = new URLSearchParams(window.location.search)
-  const hash = new URLSearchParams(window.location.hash.replace(/^#/, ''))
-  return { candidateId: query.get('candidateId') || hash.get('candidateId') || '', sessionId: query.get('sessionId') || hash.get('sessionId') || '', accessToken: hash.get('accessToken') || query.get('accessToken') || '' }
-}
+import { parseInviteCredentials } from '../interview/security'
 
 export default function CandidateAccessPage() {
   const navigate = useNavigate(); const location = useLocation(); const startedRef = useRef(false)
@@ -16,7 +11,7 @@ export default function CandidateAccessPage() {
   useEffect(() => {
     if (startedRef.current) return
     startedRef.current = true
-    const credentials = inviteCredentials()
+    const credentials = parseInviteCredentials(window.location)
     window.history.replaceState({}, document.title, window.location.pathname)
     if (!credentials.candidateId || !credentials.accessToken) { setStatus('missing'); setMessage(location.state?.message || 'This interview link is incomplete. Please open the complete secure link sent by your recruiter.'); return }
 
