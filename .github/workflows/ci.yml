@@ -8,6 +8,7 @@ on:
   pull_request:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -44,12 +45,12 @@ jobs:
       - run: npm test
       - run: npm run check
       - name: Live Gemini API smoke
-        if: ${{ env.GEMINI_API_KEY != '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && env.GEMINI_API_KEY != '' }}
         env:
           GEMINI_INTERVIEW_MODEL: gemini-3.8-flash
         run: npm run smoke:gemini
       - name: Report missing Gemini smoke credential
-        if: ${{ env.GEMINI_API_KEY == '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' && env.GEMINI_API_KEY == '' }}
         run: echo "::warning::GEMINI_API_KEY secret is not configured; live Gemini smoke was skipped."
 
   frontend:
