@@ -35,15 +35,25 @@ export function createGeminiClient({
 
   return {
     model,
-    async generateText({ input, systemInstruction = '', temperature = 0.4, maxOutputTokens = 900, responseSchema = null }) {
+    async generateText({
+      input,
+      systemInstruction = '',
+      temperature = 0.4,
+      maxOutputTokens = 900,
+      responseSchema = null,
+      thinkingLevel = 'low'
+    }) {
+      const generationConfig = {
+        max_output_tokens: positiveInteger(maxOutputTokens, 900, { min: 1, max: 8192 }),
+        thinking_level: ['low', 'medium', 'high'].includes(thinkingLevel) ? thinkingLevel : 'low'
+      };
+      if (!model.startsWith('gemini-3')) generationConfig.temperature = temperature;
+
       const body = {
         model,
         store: false,
         input: String(input || ''),
-        generation_config: {
-          temperature,
-          max_output_tokens: positiveInteger(maxOutputTokens, 900, { min: 1, max: 8192 })
-        }
+        generation_config: generationConfig
       };
       if (systemInstruction) body.system_instruction = String(systemInstruction);
       if (responseSchema) body.response_format = { type: 'text', mime_type: 'application/json', schema: responseSchema };

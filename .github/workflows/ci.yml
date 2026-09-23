@@ -27,6 +27,7 @@ jobs:
           --health-retries 20
     env:
       MONGO_INTEGRATION_URI: mongodb://127.0.0.1:27017
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
     defaults:
       run:
         working-directory: backend
@@ -42,6 +43,14 @@ jobs:
         run: npm audit --omit=dev
       - run: npm test
       - run: npm run check
+      - name: Live Gemini API smoke
+        if: ${{ env.GEMINI_API_KEY != '' }}
+        env:
+          GEMINI_INTERVIEW_MODEL: gemini-3.8-flash
+        run: npm run smoke:gemini
+      - name: Report missing Gemini smoke credential
+        if: ${{ env.GEMINI_API_KEY == '' }}
+        run: echo "::warning::GEMINI_API_KEY secret is not configured; live Gemini smoke was skipped."
 
   frontend:
     runs-on: ubuntu-latest
