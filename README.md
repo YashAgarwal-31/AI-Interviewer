@@ -214,7 +214,7 @@ npm test
 npm run build
 ```
 
-Regression tests cover authentication/token primitives, production session-state rules, CSV-export safety, API security headers, CORS rejection, request-size enforcement, health/not-found behavior, graceful shutdown, Gemini request formatting/retry behavior, and fail-closed production startup. When the repository Actions secret `GEMINI_API_KEY` is configured, CI also requires a real response from `gemini-3.8-flash` through the production backend client.
+Regression tests cover authentication/token primitives, production session-state rules, CSV-export safety, API security headers, CORS rejection, request-size enforcement, health/not-found behavior, graceful shutdown, Gemini request formatting/retry behavior, and fail-closed production startup. When the repository Actions secret `GEMINI_API_KEY` is configured, a manually dispatched CI run also requires a real response from `gemini-3.8-flash` through the production backend client. Keeping this provider check manual avoids consuming the free-tier daily quota on every code or documentation push.
 
 ## Deployment
 
@@ -281,5 +281,5 @@ The current automated quality gate covers:
 - **Security:** Production dependency audits for backend and frontend
 - **Quality:** Backend syntax checks, frontend ESLint, and frontend production build
 
-CI validates a real Google Gemini response when `GEMINI_API_KEY` is configured; the key stays masked and server-side. Resend delivery, camera/microphone permissions, speech recognition, MediaPipe model delivery, the external coding editor, and the complete deployed candidate/recruiter browser journey still require their respective providers and supported devices. Follow the live smoke-test checklist in [DEPLOYMENT.md](./DEPLOYMENT.md) before inviting real candidates.
+A manually dispatched CI run validates a real Google Gemini response when `GEMINI_API_KEY` is configured; the key stays masked and server-side. Resend delivery, camera/microphone permissions, speech recognition, MediaPipe model delivery, the external coding editor, and the complete deployed candidate/recruiter browser journey still require their respective providers and supported devices. Follow the live smoke-test checklist in [DEPLOYMENT.md](./DEPLOYMENT.md) before inviting real candidates.
 
