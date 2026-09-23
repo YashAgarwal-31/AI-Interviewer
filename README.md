@@ -201,6 +201,7 @@ npm ci
 npm audit --omit=dev
 npm test
 npm run check
+npm run smoke:gemini  # requires GEMINI_API_KEY
 ```
 
 **Frontend**
@@ -213,7 +214,7 @@ npm test
 npm run build
 ```
 
-Regression tests cover authentication/token primitives, production session-state rules, CSV-export safety, API security headers, CORS rejection, request-size enforcement, health/not-found behavior, graceful shutdown, and fail-closed production startup.
+Regression tests cover authentication/token primitives, production session-state rules, CSV-export safety, API security headers, CORS rejection, request-size enforcement, health/not-found behavior, graceful shutdown, Gemini request formatting/retry behavior, and fail-closed production startup. When the repository Actions secret `GEMINI_API_KEY` is configured, CI also requires a real response from `gemini-3.8-flash` through the production backend client.
 
 ## Deployment
 
@@ -252,6 +253,7 @@ The latest **main** branch includes an additional production-hardening pass focu
 - Candidate profile, resume, project, custom-question, and coding-task content is explicitly isolated as untrusted reference data in the AI prompt.
 - Candidate-controlled prompt delimiters are escaped before they reach the model.
 - AI evaluation requests use structured JSON output and retain safe fallback behavior when evaluation is unavailable.
+- Gemini 3 requests use bounded output, low thinking, timeouts, and transient-error retries to avoid thought-token truncation while keeping interview latency controlled.
 - External coding-editor messages must match both the configured origin and the exact iframe window.
 - Editor payloads are normalized and bounded before submission.
 - The frontend deployment configuration includes Content Security Policy, cross-origin isolation, referrer, permissions, framing, and content-type protections.
@@ -273,11 +275,11 @@ The CI workflow now starts a real MongoDB 7 service and tests the complete core 
 
 The current automated quality gate covers:
 
-- **Backend:** 21 tests
+- **Backend:** 25 tests
 - **Frontend:** 10 tests
 - **Database integration:** Real MongoDB-backed recruiter-to-result flow
 - **Security:** Production dependency audits for backend and frontend
 - **Quality:** Backend syntax checks, frontend ESLint, and frontend production build
 
-Live Google Gemini responses, Resend delivery, camera/microphone permissions, speech recognition, MediaPipe model delivery, and the external coding editor still require their respective credentials, providers, network access, and a supported browser/device. Follow the live smoke-test checklist in [DEPLOYMENT.md](./DEPLOYMENT.md) before inviting real candidates.
+CI validates a real Google Gemini response when `GEMINI_API_KEY` is configured; the key stays masked and server-side. Resend delivery, camera/microphone permissions, speech recognition, MediaPipe model delivery, the external coding editor, and the complete deployed candidate/recruiter browser journey still require their respective providers and supported devices. Follow the live smoke-test checklist in [DEPLOYMENT.md](./DEPLOYMENT.md) before inviting real candidates.
 
