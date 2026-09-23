@@ -44,3 +44,23 @@ test('Gemini client requests structured JSON and retries transient failures', as
 test('Gemini client rejects missing credentials', () => {
   assert.throws(() => createGeminiClient({ apiKey: '', fetchImpl: async () => response() }), /GEMINI_API_KEY is required/);
 });
+
+
+test('Gemini 3 requests use low thinking and omit deprecated sampling temperature', async () => {
+  let capturedBody = null;
+  const client = createGeminiClient({
+    apiKey: 'test-key',
+    model: 'gemini-3.8-flash',
+    maxRetries: 0,
+    fetchImpl: async (_url, options) => {
+      capturedBody = JSON.parse(options.body);
+      return response({ body: { status: 'completed', steps: [{ type: 'model_output', content: [{ type: 'text', text: 'Ready' }] }] } });
+    }
+  });
+
+  await client.generateText({ input: 'Start interview', temperature: 0.2 });
+
+  assert.equal(capturedBody.generation_config.thinking_level, 'low');
+  assert.equal(capturedBody.generation_config.temperature, undefined);
+  assert.equal(capturedBody.generation_config.max_output_tokens, 900);
+});

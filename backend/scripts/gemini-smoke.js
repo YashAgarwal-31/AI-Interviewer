@@ -7,7 +7,7 @@ const output = await client.generateText({
   systemInstruction: 'Follow the user instruction exactly and return plain text only.',
   input: `Reply with exactly ${expected} and nothing else.`,
   temperature: 0,
-  maxOutputTokens: 40
+  maxOutputTokens: 512
 });
 
 if (!output.includes(expected)) {
